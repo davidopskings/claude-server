@@ -89,25 +89,77 @@ export async function createWorktree(
     throw new Error(`Bare repository does not exist: ${barePath}`);
   }
 
+  // Clean up any orphaned worktrees first
+  try {
+    execSync('git worktree prune', { cwd: barePath, stdio: 'pipe' });
+  } catch {
+    // Ignore prune errors
+  }
+
   // Create parent directory
   mkdirSync(dirname(worktreePath), { recursive: true });
 
   console.log(`Creating worktree for job ${job.id} at ${worktreePath}...`);
 
   // Check if branch already exists
+  let branchExists = false;
   try {
     execSync(`git show-ref --verify refs/heads/${job.branch_name}`, {
       cwd: barePath,
       stdio: 'pipe'
     });
-    // Branch exists locally, check it out
+    branchExists = true;
+  } catch {
+    branchExists = false;
+  }
+
+  if (branchExists) {
+    // Check if branch is already checked out in another worktree
+    try {
+      const worktreeList = execSync('git worktree list --porcelain', {
+        cwd: barePath,
+        encoding: 'utf-8'
+      });
+
+      // Parse worktree list to find if our branch is checked out
+      const lines = worktreeList.split('\n');
+      let currentWorktreePath: string | null = null;
+
+      for (const line of lines) {
+        if (line.startsWith('worktree ')) {
+          currentWorktreePath = line.substring(9);
+        } else if (line.startsWith('branch refs/heads/') && currentWorktreePath) {
+          const branchName = line.substring(18);
+          if (branchName === job.branch_name) {
+            // Branch is checked out elsewhere - remove that worktree first
+            console.log(`Branch ${job.branch_name} is checked out at ${currentWorktreePath}, removing...`);
+            try {
+              execSync(`git worktree remove --force "${currentWorktreePath}"`, {
+                cwd: barePath,
+                stdio: 'pipe'
+              });
+            } catch {
+              // Force remove the directory if git worktree remove fails
+              if (existsSync(currentWorktreePath)) {
+                rmSync(currentWorktreePath, { recursive: true, force: true });
+              }
+              execSync('git worktree prune', { cwd: barePath, stdio: 'pipe' });
+            }
+            break;
+          }
+        }
+      }
+    } catch {
+      // Ignore errors checking worktree list
+    }
+
+    // Branch exists, check it out
     execSync(
       `git worktree add "${worktreePath}" ${job.branch_name}`,
       { cwd: barePath, stdio: 'pipe' }
     );
-  } catch {
+  } else {
     // Branch doesn't exist, create from default branch
-    // In bare repos, branches are local (not origin/), so use the local branch name
     execSync(
       `git worktree add -b ${job.branch_name} "${worktreePath}" ${defaultBranch}`,
       { cwd: barePath, stdio: 'pipe' }

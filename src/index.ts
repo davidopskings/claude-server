@@ -15,7 +15,7 @@ import {
   createJob,
 } from './db/index.js';
 import { processQueue, getQueueStatus, cancelJob, initQueue } from './queue.js';
-import { checkClaudeAuth, cancelJob as cancelRunnerJob } from './runner.js';
+import { checkClaudeAuth, cancelJob as cancelRunnerJob, sendMessageToJob, isJobInteractive, endInteractiveJob } from './runner.js';
 import { checkGitAuth, fetchAllRepos, cloneAllRepos, cloneRepo } from './git.js';
 
 // Configuration
@@ -171,10 +171,14 @@ app.post('/jobs', async (req: Request, res: Response) => {
       prompt,
       branchName,
       title,
+      jobType,
       createdByTeamMemberId
     } = req.body;
 
-    if (!prompt || !branchName) {
+    // For task jobs, auto-generate branch name if not provided
+    const finalBranchName = branchName || (jobType === 'task' ? `task-${Date.now()}` : null);
+
+    if (!prompt || !finalBranchName) {
       return res.status(400).json({ error: 'prompt and branchName required' });
     }
 
@@ -203,8 +207,9 @@ app.post('/jobs', async (req: Request, res: Response) => {
       featureId,
       repositoryId: finalRepositoryId,
       prompt,
-      branchName,
+      branchName: finalBranchName,
       title,
+      jobType,
       createdByTeamMemberId
     });
 
@@ -280,6 +285,82 @@ app.post('/jobs/:id/retry', async (req: Request, res: Response) => {
       originalJobId: req.params.id,
       status: newJob.status,
       branchName: newJob.branch_name
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send a message to an interactive task job (when Claude asks a question)
+app.post('/jobs/:id/message', async (req: Request, res: Response) => {
+  try {
+    const { message } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: 'message required' });
+    }
+
+    const job = await getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (job.status !== 'running') {
+      return res.status(400).json({ error: 'Job is not running' });
+    }
+
+    if (job.job_type !== 'task') {
+      return res.status(400).json({ error: 'Only task jobs support interactive messaging' });
+    }
+
+    if (!isJobInteractive(req.params.id)) {
+      return res.status(400).json({ error: 'Job is not accepting messages (not interactive or already finished)' });
+    }
+
+    const sent = sendMessageToJob(req.params.id, message);
+
+    if (!sent) {
+      return res.status(500).json({ error: 'Failed to send message to job' });
+    }
+
+    res.json({
+      id: req.params.id,
+      messageSent: true
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// End an interactive task job session (marks it as complete)
+app.post('/jobs/:id/complete', async (req: Request, res: Response) => {
+  try {
+    const job = await getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (job.status !== 'running') {
+      return res.status(400).json({ error: 'Job is not running' });
+    }
+
+    if (job.job_type !== 'task') {
+      return res.status(400).json({ error: 'Only task jobs support this endpoint' });
+    }
+
+    if (!isJobInteractive(req.params.id)) {
+      return res.status(400).json({ error: 'Job is not interactive or already finished' });
+    }
+
+    const ended = endInteractiveJob(req.params.id);
+
+    if (!ended) {
+      return res.status(500).json({ error: 'Failed to end job session' });
+    }
+
+    res.json({
+      id: req.params.id,
+      status: 'completing'
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

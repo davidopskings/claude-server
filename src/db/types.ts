@@ -1,5 +1,8 @@
 import type { Database } from '../types/supabase.js';
 
+// Job types
+export type JobType = 'code' | 'task';
+
 // Table row types
 export type Client = Database['public']['Tables']['clients']['Row'];
 export type Feature = Database['public']['Tables']['features']['Row'];

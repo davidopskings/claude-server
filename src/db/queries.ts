@@ -161,6 +161,7 @@ export async function createJob(job: {
   prompt: string;
   branchName: string;
   title?: string;
+  jobType?: string;
   createdByTeamMemberId?: string;
 }): Promise<AgentJob> {
   const insert: AgentJobInsert = {
@@ -170,6 +171,7 @@ export async function createJob(job: {
     prompt: job.prompt,
     branch_name: job.branchName,
     title: job.title,
+    job_type: job.jobType,
     created_by_team_member_id: job.createdByTeamMemberId,
     status: 'queued'
   };
@@ -197,7 +199,7 @@ export async function updateJob(id: string, updates: AgentJobUpdate): Promise<vo
 
 export async function addJobMessage(
   jobId: string,
-  type: 'stdout' | 'stderr' | 'system',
+  type: 'stdout' | 'stderr' | 'system' | 'user_input',
   content: string
 ): Promise<void> {
   await supabase

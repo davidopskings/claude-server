@@ -144,6 +144,7 @@ export type Database = {
           feature_id: string | null
           files_changed: number | null
           id: string
+          job_type: string | null
           pid: number | null
           pr_number: number | null
           pr_url: string | null
@@ -168,6 +169,7 @@ export type Database = {
           feature_id?: string | null
           files_changed?: number | null
           id?: string
+          job_type?: string | null
           pid?: number | null
           pr_number?: number | null
           pr_url?: string | null
@@ -192,6 +194,7 @@ export type Database = {
           feature_id?: string | null
           files_changed?: number | null
           id?: string
+          job_type?: string | null
           pid?: number | null
           pr_number?: number | null
           pr_url?: string | null
