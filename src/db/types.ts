@@ -1,7 +1,22 @@
 import type { Database } from '../types/supabase.js';
 
 // Job types
-export type JobType = 'code' | 'task';
+export type JobType = 'code' | 'task' | 'ralph';
+
+// Ralph-specific types
+export type RalphCompletionReason =
+  | 'promise_detected'
+  | 'max_iterations'
+  | 'manual_stop'
+  | 'iteration_error';
+
+export interface FeedbackResult {
+  command: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  passed: boolean;
+}
 
 // Table row types
 export type Client = Database['public']['Tables']['clients']['Row'];
@@ -11,16 +26,19 @@ export type CodeBranch = Database['public']['Tables']['code_branches']['Row'];
 export type CodePullRequest = Database['public']['Tables']['code_pull_requests']['Row'];
 export type AgentJob = Database['public']['Tables']['agent_jobs']['Row'];
 export type AgentJobMessage = Database['public']['Tables']['agent_job_messages']['Row'];
+export type AgentJobIteration = Database['public']['Tables']['agent_job_iterations']['Row'];
 
 // Insert types
 export type AgentJobInsert = Database['public']['Tables']['agent_jobs']['Insert'];
 export type AgentJobMessageInsert = Database['public']['Tables']['agent_job_messages']['Insert'];
+export type AgentJobIterationInsert = Database['public']['Tables']['agent_job_iterations']['Insert'];
 export type CodeBranchInsert = Database['public']['Tables']['code_branches']['Insert'];
 export type CodePullRequestInsert = Database['public']['Tables']['code_pull_requests']['Insert'];
 export type CodeRepositoryInsert = Database['public']['Tables']['code_repositories']['Insert'];
 
 // Update types
 export type AgentJobUpdate = Database['public']['Tables']['agent_jobs']['Update'];
+export type AgentJobIterationUpdate = Database['public']['Tables']['agent_job_iterations']['Update'];
 
 // Custom query return types (for joins)
 export type JobWithDetails = AgentJob & {

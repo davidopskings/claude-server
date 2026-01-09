@@ -4,6 +4,9 @@ import type {
   AgentJobInsert,
   AgentJobUpdate,
   AgentJobMessage,
+  AgentJobIteration,
+  AgentJobIterationInsert,
+  AgentJobIterationUpdate,
   CodeRepository,
   CodeBranchInsert,
   CodePullRequestInsert,
@@ -163,6 +166,10 @@ export async function createJob(job: {
   title?: string;
   jobType?: string;
   createdByTeamMemberId?: string;
+  // Ralph-specific fields
+  maxIterations?: number;
+  completionPromise?: string;
+  feedbackCommands?: string[];
 }): Promise<AgentJob> {
   const insert: AgentJobInsert = {
     client_id: job.clientId,
@@ -173,7 +180,11 @@ export async function createJob(job: {
     title: job.title,
     job_type: job.jobType,
     created_by_team_member_id: job.createdByTeamMemberId,
-    status: 'queued'
+    status: 'queued',
+    // Ralph-specific fields
+    max_iterations: job.maxIterations,
+    completion_promise: job.completionPromise,
+    feedback_commands: job.feedbackCommands
   };
 
   const { data, error } = await supabase
@@ -302,6 +313,51 @@ export async function listRepositories(): Promise<CodeRepository[]> {
     .select('*')
     .eq('provider', 'github')
     .order('repo_name');
+
+  return data || [];
+}
+
+// ----- Job Iterations (Ralph Loop) -----
+
+export async function createIteration(
+  jobId: string,
+  iterationNumber: number
+): Promise<AgentJobIteration> {
+  const insert: AgentJobIterationInsert = {
+    job_id: jobId,
+    iteration_number: iterationNumber,
+    started_at: new Date().toISOString(),
+    promise_detected: false
+  };
+
+  const { data, error } = await supabase
+    .from('agent_job_iterations')
+    .insert(insert)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function updateIteration(
+  id: string,
+  updates: AgentJobIterationUpdate
+): Promise<void> {
+  const { error } = await supabase
+    .from('agent_job_iterations')
+    .update(updates)
+    .eq('id', id);
+
+  if (error) throw error;
+}
+
+export async function getJobIterations(jobId: string): Promise<AgentJobIteration[]> {
+  const { data } = await supabase
+    .from('agent_job_iterations')
+    .select('*')
+    .eq('job_id', jobId)
+    .order('iteration_number', { ascending: true });
 
   return data || [];
 }

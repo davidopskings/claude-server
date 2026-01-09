@@ -1,6 +1,7 @@
-import { spawn, ChildProcess } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { spawn, ChildProcess, exec } from 'child_process';
+import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
+import { promisify } from 'util';
 import {
   getJob,
   getRepositoryByClientId,
@@ -9,8 +10,11 @@ import {
   addJobMessage,
   createCodeBranch,
   createCodePullRequest,
+  createIteration,
+  updateIteration,
   type CodeRepository
 } from './db/index.js';
+import type { FeedbackResult, RalphCompletionReason } from './db/types.js';
 import {
   ensureBareRepo,
   fetchOrigin,
@@ -19,6 +23,8 @@ import {
   commitAndPush,
   createPullRequest
 } from './git.js';
+
+const execAsync = promisify(exec);
 
 const HOME_DIR = process.env.HOME || '/Users/davidcavarlacic';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || `${HOME_DIR}/.local/bin/claude`;
@@ -183,6 +189,452 @@ export async function runJob(jobId: string): Promise<void> {
     }
   }
 }
+
+// ===== Ralph Loop Job Runner =====
+
+const PROGRESS_FILE = '.ralph-progress.md';
+
+export async function runRalphJob(jobId: string): Promise<void> {
+  const job = await getJob(jobId);
+  if (!job) throw new Error(`Job not found: ${jobId}`);
+
+  // Get repository info
+  let repo: CodeRepository | null = null;
+  if (job.repository_id) {
+    repo = await getRepositoryById(job.repository_id);
+  } else {
+    repo = await getRepositoryByClientId(job.client_id);
+  }
+
+  if (!repo) {
+    await updateJob(jobId, {
+      status: 'failed',
+      error: 'No repository found for client. Add one to code_repositories first.',
+      completed_at: new Date().toISOString()
+    });
+    return;
+  }
+
+  // Update job with repository_id if it wasn't set
+  if (!job.repository_id) {
+    await updateJob(jobId, { repository_id: repo.id });
+  }
+
+  const maxIterations = job.max_iterations || 10;
+  const completionPromise = job.completion_promise || 'RALPH_COMPLETE';
+  const feedbackCommands = (job.feedback_commands as string[] | null) || [];
+
+  let worktreePath: string | null = null;
+
+  try {
+    // Update status to running
+    await updateJob(jobId, {
+      status: 'running',
+      started_at: new Date().toISOString(),
+      current_iteration: 0
+    });
+
+    await addJobMessage(jobId, 'system', `Starting Ralph loop for ${repo.owner_name}/${repo.repo_name}`);
+    await addJobMessage(jobId, 'system', `Max iterations: ${maxIterations}, Completion promise: "${completionPromise}"`);
+
+    // 1. Setup git
+    await addJobMessage(jobId, 'system', `Ensuring bare repository exists...`);
+    await ensureBareRepo(repo);
+
+    await addJobMessage(jobId, 'system', `Fetching latest from origin...`);
+    await fetchOrigin(repo);
+
+    await addJobMessage(jobId, 'system', `Creating worktree: ${job.branch_name}`);
+    worktreePath = await createWorktree(repo, job);
+    await updateJob(jobId, { worktree_path: worktreePath });
+
+    // 2. Initialize progress file
+    initProgressFile(worktreePath, job.id, job.branch_name);
+
+    // 3. Iteration loop
+    let completionReason: RalphCompletionReason | null = null;
+    let finalIteration = 0;
+
+    for (let i = 1; i <= maxIterations; i++) {
+      finalIteration = i;
+
+      // Check for manual stop request
+      const currentJob = await getJob(jobId);
+      if (currentJob?.status === 'cancelled') {
+        completionReason = 'manual_stop';
+        await addJobMessage(jobId, 'system', `Job was cancelled at iteration ${i}`);
+        break;
+      }
+
+      await updateJob(jobId, { current_iteration: i });
+      await addJobMessage(jobId, 'system', `\n========== ITERATION ${i}/${maxIterations} ==========`);
+
+      // Create iteration record
+      const iteration = await createIteration(jobId, i);
+
+      // Build iteration prompt
+      const iterationPrompt = buildIterationPrompt(
+        job.prompt,
+        i,
+        maxIterations,
+        completionPromise,
+        worktreePath
+      );
+
+      // Run Claude for this iteration (with retry on crash)
+      let result = await runClaudeIteration(iterationPrompt, worktreePath, jobId, iteration.id, completionPromise);
+
+      // Retry once on crash
+      if (result.exitCode !== 0 && !result.promiseDetected) {
+        await addJobMessage(jobId, 'system', `Iteration crashed (exit code ${result.exitCode}), retrying...`);
+        result = await runClaudeIteration(iterationPrompt, worktreePath, jobId, iteration.id, completionPromise);
+      }
+
+      // Update iteration record
+      await updateIteration(iteration.id, {
+        completed_at: new Date().toISOString(),
+        exit_code: result.exitCode,
+        error: result.error,
+        prompt_used: iterationPrompt,
+        promise_detected: result.promiseDetected,
+        output_summary: result.summary
+      });
+
+      // Check for completion promise
+      if (result.promiseDetected) {
+        completionReason = 'promise_detected';
+        await addJobMessage(jobId, 'system', `\n✓ Completion promise detected! Task complete.`);
+        break;
+      }
+
+      // Check for iteration failure (after retry)
+      if (result.exitCode !== 0) {
+        completionReason = 'iteration_error';
+        await addJobMessage(jobId, 'system', `Iteration ${i} failed after retry with exit code ${result.exitCode}`);
+        break;
+      }
+
+      // Run feedback commands if configured
+      let feedbackResults: FeedbackResult[] = [];
+      if (feedbackCommands.length > 0) {
+        feedbackResults = await runFeedbackCommands(feedbackCommands, worktreePath, jobId);
+        await updateIteration(iteration.id, { feedback_results: JSON.parse(JSON.stringify(feedbackResults)) });
+
+        // Append feedback to progress file (both successes and failures)
+        appendFeedbackToProgress(worktreePath, feedbackResults, i);
+      }
+
+      // Append iteration summary to progress file
+      appendIterationToProgress(worktreePath, i, result.summary);
+
+      await addJobMessage(jobId, 'system', `Iteration ${i} complete.`);
+    }
+
+    // Reached max iterations without completion promise
+    if (!completionReason) {
+      completionReason = 'max_iterations';
+      await addJobMessage(jobId, 'system', `\nReached maximum iterations (${maxIterations}) without completion.`);
+    }
+
+    // 4. Post-loop: Commit, push, create PR
+    await addJobMessage(jobId, 'system', `\n========== CREATING PR ==========`);
+    const hasChanges = await commitAndPush(worktreePath, job);
+
+    if (hasChanges) {
+      const branchRecord = await createCodeBranch({
+        repositoryId: repo.id,
+        featureId: job.feature_id || undefined,
+        name: job.branch_name,
+        url: `https://github.com/${repo.owner_name}/${repo.repo_name}/tree/${job.branch_name}`
+      });
+
+      const pr = await createPullRequest(repo, job, worktreePath);
+
+      const prRecord = await createCodePullRequest({
+        repositoryId: repo.id,
+        featureId: job.feature_id || undefined,
+        branchId: branchRecord.id,
+        number: pr.number,
+        title: pr.title,
+        status: 'open',
+        url: pr.url
+      });
+
+      await updateJob(jobId, {
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        exit_code: 0,
+        pr_url: pr.url,
+        pr_number: pr.number,
+        files_changed: pr.filesChanged,
+        code_branch_id: branchRecord.id,
+        code_pull_request_id: prRecord.id,
+        total_iterations: finalIteration,
+        completion_reason: completionReason
+      });
+
+      await addJobMessage(jobId, 'system', `\nRalph job completed after ${finalIteration} iterations!`);
+      await addJobMessage(jobId, 'system', `Completion reason: ${completionReason}`);
+      await addJobMessage(jobId, 'system', `PR: ${pr.url}`);
+    } else {
+      await updateJob(jobId, {
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        exit_code: 0,
+        error: 'No changes were made',
+        total_iterations: finalIteration,
+        completion_reason: completionReason
+      });
+
+      await addJobMessage(jobId, 'system', `\nRalph job completed after ${finalIteration} iterations but no changes were made.`);
+    }
+
+  } catch (err: any) {
+    console.error(`Ralph job ${jobId} failed:`, err);
+
+    await updateJob(jobId, {
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error: err.message || String(err),
+      completion_reason: 'iteration_error'
+    });
+
+    await addJobMessage(jobId, 'system', `Ralph job failed: ${err.message}`);
+
+  } finally {
+    // Cleanup worktree
+    if (worktreePath && repo) {
+      try {
+        await removeWorktree(repo, worktreePath);
+      } catch (cleanupErr) {
+        console.error(`Failed to cleanup worktree:`, cleanupErr);
+      }
+    }
+  }
+}
+
+// Run a single Claude iteration
+async function runClaudeIteration(
+  prompt: string,
+  cwd: string,
+  jobId: string,
+  iterationId: string,
+  completionPromise: string
+): Promise<{
+  exitCode: number;
+  error?: string;
+  promiseDetected: boolean;
+  summary: string;
+}> {
+  return new Promise((resolve) => {
+    const proc = spawn(CLAUDE_BIN, [
+      '--print',
+      '--dangerously-skip-permissions',
+      '--output-format', 'stream-json',
+      '--verbose',
+      prompt
+    ], {
+      cwd,
+      env: { ...process.env, HOME: HOME_DIR },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    runningProcesses.set(jobId, proc);
+
+    if (proc.pid) {
+      updateJob(jobId, { pid: proc.pid });
+      updateIteration(iterationId, { pid: proc.pid });
+    }
+
+    let stdout = '';
+    let stderrBuffer = '';
+
+    proc.stdout.on('data', (data: Buffer) => {
+      const content = data.toString();
+      stdout += content;
+      process.stdout.write(content);
+      addJobMessage(jobId, 'stdout', content);
+    });
+
+    proc.stderr.on('data', (data: Buffer) => {
+      const content = data.toString();
+      stderrBuffer += content;
+      process.stderr.write(content);
+      addJobMessage(jobId, 'stderr', content);
+    });
+
+    proc.on('close', (code: number | null) => {
+      runningProcesses.delete(jobId);
+
+      const promiseDetected = stdout.includes(completionPromise);
+      const summary = extractSummary(stdout);
+
+      resolve({
+        exitCode: code || 0,
+        error: code !== 0 ? stderrBuffer || 'Unknown error' : undefined,
+        promiseDetected,
+        summary
+      });
+    });
+
+    proc.on('error', (err: Error) => {
+      runningProcesses.delete(jobId);
+      resolve({
+        exitCode: 1,
+        error: err.message,
+        promiseDetected: false,
+        summary: ''
+      });
+    });
+  });
+}
+
+// Build the prompt for each iteration
+function buildIterationPrompt(
+  basePrompt: string,
+  iteration: number,
+  maxIterations: number,
+  completionPromise: string,
+  worktreePath: string
+): string {
+  const progressContent = readProgressFile(worktreePath);
+
+  return `## Ralph Loop Context
+- Iteration: ${iteration} of ${maxIterations}
+- To signal completion, output: ${completionPromise}
+
+## Previous Progress
+${progressContent || 'No previous progress - this is the first iteration.'}
+
+## Your Task
+${basePrompt}
+
+## Instructions
+1. Review the progress above from previous iterations
+2. Continue working on the task
+3. At the end of your work, include a "## Summary" section describing:
+   - What you accomplished this iteration
+   - What remains to be done (if anything)
+4. If the task is fully complete, output "${completionPromise}" after your summary
+5. If feedback commands failed in previous iteration, prioritize fixing those issues
+`;
+}
+
+// Run feedback commands (tests, lint, etc.)
+async function runFeedbackCommands(
+  commands: string[],
+  cwd: string,
+  jobId: string
+): Promise<FeedbackResult[]> {
+  const results: FeedbackResult[] = [];
+
+  for (const command of commands) {
+    await addJobMessage(jobId, 'system', `Running feedback: ${command}`);
+
+    try {
+      const { stdout, stderr } = await execAsync(command, { cwd, timeout: 120000 });
+      results.push({
+        command,
+        exitCode: 0,
+        stdout: stdout.slice(0, 5000), // Limit output size
+        stderr: stderr.slice(0, 5000),
+        passed: true
+      });
+      await addJobMessage(jobId, 'system', `✓ ${command} passed`);
+    } catch (err: any) {
+      results.push({
+        command,
+        exitCode: err.code || 1,
+        stdout: (err.stdout || '').slice(0, 5000),
+        stderr: (err.stderr || err.message || '').slice(0, 5000),
+        passed: false
+      });
+      await addJobMessage(jobId, 'system', `✗ ${command} failed (exit code ${err.code || 1})`);
+    }
+  }
+
+  return results;
+}
+
+// Progress file helpers
+function initProgressFile(worktreePath: string, jobId: string, branchName: string): void {
+  const progressPath = join(worktreePath, PROGRESS_FILE);
+  const content = `# Ralph Progress Log
+Job ID: ${jobId}
+Branch: ${branchName}
+Started: ${new Date().toISOString()}
+
+---
+`;
+  writeFileSync(progressPath, content);
+}
+
+function readProgressFile(worktreePath: string): string {
+  const progressPath = join(worktreePath, PROGRESS_FILE);
+  if (existsSync(progressPath)) {
+    return readFileSync(progressPath, 'utf8');
+  }
+  return '';
+}
+
+function appendIterationToProgress(
+  worktreePath: string,
+  iteration: number,
+  summary: string
+): void {
+  const progressPath = join(worktreePath, PROGRESS_FILE);
+  const content = `
+## Iteration ${iteration}
+Completed: ${new Date().toISOString()}
+
+### Summary
+${summary || 'No summary provided.'}
+
+---
+`;
+  appendFileSync(progressPath, content);
+}
+
+function appendFeedbackToProgress(
+  worktreePath: string,
+  results: FeedbackResult[],
+  iteration: number
+): void {
+  const progressPath = join(worktreePath, PROGRESS_FILE);
+
+  const feedbackLines = results.map(r => {
+    const status = r.passed ? '✓ PASSED' : '✗ FAILED';
+    let line = `- \`${r.command}\`: ${status}`;
+    if (!r.passed && r.stderr) {
+      // Include first few lines of error for context
+      const errorPreview = r.stderr.split('\n').slice(0, 5).join('\n  ');
+      line += `\n  Error: ${errorPreview}`;
+    }
+    return line;
+  }).join('\n');
+
+  const content = `
+### Feedback Results (Iteration ${iteration})
+${feedbackLines}
+
+`;
+  appendFileSync(progressPath, content);
+}
+
+// Extract summary from Claude's output (look for ## Summary section)
+function extractSummary(output: string): string {
+  // Try to find a ## Summary section
+  const summaryMatch = output.match(/##\s*Summary\s*\n([\s\S]*?)(?=\n##|\n---|\n\*\*|$)/i);
+  if (summaryMatch) {
+    return summaryMatch[1].trim().slice(0, 2000); // Limit size
+  }
+
+  // Fallback: get last meaningful chunk of output
+  const lines = output.split('\n').filter(l => l.trim());
+  return lines.slice(-10).join('\n').slice(0, 1000);
+}
+
+// ===== Standard Job Runner =====
 
 async function runClaudeCode(
   prompt: string,

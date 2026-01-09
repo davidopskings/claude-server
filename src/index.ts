@@ -12,7 +12,9 @@ import {
   getJob,
   getJobWithDetails,
   getJobMessages,
+  getJobIterations,
   createJob,
+  updateJob,
 } from './db/index.js';
 import { processQueue, getQueueStatus, cancelJob, initQueue } from './queue.js';
 import { checkClaudeAuth, cancelJob as cancelRunnerJob, sendMessageToJob, isJobInteractive, endInteractiveJob } from './runner.js';
@@ -172,14 +174,28 @@ app.post('/jobs', async (req: Request, res: Response) => {
       branchName,
       title,
       jobType,
-      createdByTeamMemberId
+      createdByTeamMemberId,
+      // Ralph-specific parameters
+      maxIterations,
+      completionPromise,
+      feedbackCommands
     } = req.body;
 
     // For task jobs, auto-generate branch name if not provided
-    const finalBranchName = branchName || (jobType === 'task' ? `task-${Date.now()}` : null);
+    const finalBranchName = branchName || (jobType === 'task' || jobType === 'ralph' ? `${jobType}-${Date.now()}` : null);
 
     if (!prompt || !finalBranchName) {
       return res.status(400).json({ error: 'prompt and branchName required' });
+    }
+
+    // Validate ralph-specific parameters
+    if (jobType === 'ralph') {
+      if (maxIterations !== undefined && (maxIterations < 1 || maxIterations > 100)) {
+        return res.status(400).json({ error: 'maxIterations must be between 1 and 100' });
+      }
+      if (feedbackCommands !== undefined && !Array.isArray(feedbackCommands)) {
+        return res.status(400).json({ error: 'feedbackCommands must be an array of strings' });
+      }
     }
 
     // Determine client and repository
@@ -210,7 +226,11 @@ app.post('/jobs', async (req: Request, res: Response) => {
       branchName: finalBranchName,
       title,
       jobType,
-      createdByTeamMemberId
+      createdByTeamMemberId,
+      // Ralph-specific fields (only set for ralph jobs)
+      maxIterations: jobType === 'ralph' ? (maxIterations || 10) : undefined,
+      completionPromise: jobType === 'ralph' ? (completionPromise || 'RALPH_COMPLETE') : undefined,
+      feedbackCommands: jobType === 'ralph' ? feedbackCommands : undefined
     });
 
     // Trigger queue processing
@@ -223,7 +243,13 @@ app.post('/jobs', async (req: Request, res: Response) => {
       status: job.status,
       position: queued.queued.findIndex((q) => q.id === job.id) + 1,
       branchName: job.branch_name,
-      createdAt: job.created_at
+      jobType: job.job_type,
+      createdAt: job.created_at,
+      // Include ralph config in response
+      ...(jobType === 'ralph' && {
+        maxIterations: job.max_iterations,
+        completionPromise: job.completion_promise
+      })
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -361,6 +387,72 @@ app.post('/jobs/:id/complete', async (req: Request, res: Response) => {
     res.json({
       id: req.params.id,
       status: 'completing'
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----- Ralph Loop Endpoints -----
+
+// Get iteration history for a ralph job
+app.get('/jobs/:id/iterations', async (req: Request, res: Response) => {
+  try {
+    const job = await getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (job.job_type !== 'ralph') {
+      return res.status(400).json({ error: 'Only ralph jobs have iterations' });
+    }
+
+    const iterations = await getJobIterations(req.params.id);
+
+    res.json({
+      jobId: req.params.id,
+      currentIteration: job.current_iteration,
+      maxIterations: job.max_iterations,
+      completionReason: job.completion_reason,
+      iterations: iterations.map(i => ({
+        id: i.id,
+        iterationNumber: i.iteration_number,
+        startedAt: i.started_at,
+        completedAt: i.completed_at,
+        exitCode: i.exit_code,
+        error: i.error,
+        promiseDetected: i.promise_detected,
+        outputSummary: i.output_summary,
+        feedbackResults: i.feedback_results
+      }))
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Gracefully stop a ralph job after current iteration
+app.post('/jobs/:id/stop', async (req: Request, res: Response) => {
+  try {
+    const job = await getJob(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (job.job_type !== 'ralph') {
+      return res.status(400).json({ error: 'Only ralph jobs support graceful stop. Use /cancel for other job types.' });
+    }
+
+    if (job.status !== 'running') {
+      return res.status(400).json({ error: 'Job is not running' });
+    }
+
+    // Mark job as cancelled - the ralph loop checks for this and will stop gracefully
+    await updateJob(req.params.id, { status: 'cancelled' });
+
+    res.json({
+      id: req.params.id,
+      message: 'Stop requested - job will complete after current iteration and create PR with partial work'
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

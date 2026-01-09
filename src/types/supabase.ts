@@ -98,6 +98,62 @@ export type Database = {
           },
         ]
       }
+      agent_job_iterations: {
+        Row: {
+          id: string
+          job_id: string
+          iteration_number: number
+          started_at: string | null
+          completed_at: string | null
+          exit_code: number | null
+          error: string | null
+          pid: number | null
+          prompt_used: string | null
+          promise_detected: boolean
+          output_summary: string | null
+          feedback_results: Json | null
+          created_at: string | null
+        }
+        Insert: {
+          id?: string
+          job_id: string
+          iteration_number: number
+          started_at?: string | null
+          completed_at?: string | null
+          exit_code?: number | null
+          error?: string | null
+          pid?: number | null
+          prompt_used?: string | null
+          promise_detected?: boolean
+          output_summary?: string | null
+          feedback_results?: Json | null
+          created_at?: string | null
+        }
+        Update: {
+          id?: string
+          job_id?: string
+          iteration_number?: number
+          started_at?: string | null
+          completed_at?: string | null
+          exit_code?: number | null
+          error?: string | null
+          pid?: number | null
+          prompt_used?: string | null
+          promise_detected?: boolean
+          output_summary?: string | null
+          feedback_results?: Json | null
+          created_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_job_iterations_job_id_fkey"
+            columns: ["job_id"]
+            isOneToOne: false
+            referencedRelation: "agent_jobs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       agent_job_messages: {
         Row: {
           content: string
@@ -137,14 +193,19 @@ export type Database = {
           code_branch_id: string | null
           code_pull_request_id: string | null
           completed_at: string | null
+          completion_promise: string | null
+          completion_reason: string | null
           created_at: string | null
           created_by_team_member_id: string | null
+          current_iteration: number | null
           error: string | null
           exit_code: number | null
           feature_id: string | null
+          feedback_commands: Json | null
           files_changed: number | null
           id: string
           job_type: string | null
+          max_iterations: number | null
           pid: number | null
           pr_number: number | null
           pr_url: string | null
@@ -153,6 +214,7 @@ export type Database = {
           started_at: string | null
           status: string
           title: string | null
+          total_iterations: number | null
           updated_at: string | null
           worktree_path: string | null
         }
@@ -162,14 +224,19 @@ export type Database = {
           code_branch_id?: string | null
           code_pull_request_id?: string | null
           completed_at?: string | null
+          completion_promise?: string | null
+          completion_reason?: string | null
           created_at?: string | null
           created_by_team_member_id?: string | null
+          current_iteration?: number | null
           error?: string | null
           exit_code?: number | null
           feature_id?: string | null
+          feedback_commands?: Json | null
           files_changed?: number | null
           id?: string
           job_type?: string | null
+          max_iterations?: number | null
           pid?: number | null
           pr_number?: number | null
           pr_url?: string | null
@@ -178,6 +245,7 @@ export type Database = {
           started_at?: string | null
           status?: string
           title?: string | null
+          total_iterations?: number | null
           updated_at?: string | null
           worktree_path?: string | null
         }
@@ -187,14 +255,19 @@ export type Database = {
           code_branch_id?: string | null
           code_pull_request_id?: string | null
           completed_at?: string | null
+          completion_promise?: string | null
+          completion_reason?: string | null
           created_at?: string | null
           created_by_team_member_id?: string | null
+          current_iteration?: number | null
           error?: string | null
           exit_code?: number | null
           feature_id?: string | null
+          feedback_commands?: Json | null
           files_changed?: number | null
           id?: string
           job_type?: string | null
+          max_iterations?: number | null
           pid?: number | null
           pr_number?: number | null
           pr_url?: string | null
@@ -203,6 +276,7 @@ export type Database = {
           started_at?: string | null
           status?: string
           title?: string | null
+          total_iterations?: number | null
           updated_at?: string | null
           worktree_path?: string | null
         }

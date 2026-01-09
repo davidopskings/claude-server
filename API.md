@@ -93,12 +93,13 @@ Add a GitHub repository to a client.
 
 ## Jobs
 
-There are two job types:
+There are three job types:
 
 | Type | Description |
 |------|-------------|
 | `code` | Creates a PR with code changes. Non-interactive, runs to completion. |
 | `task` | Interactive Q&A/research session. No code modifications. Uses MCP tools. |
+| `ralph` | Ralph Wiggum loop - iterates Claude until completion or max iterations. Creates a single PR at the end. |
 
 ### GET /jobs
 List jobs with optional filters.
@@ -170,14 +171,17 @@ Create a new job.
 | `githubOrg` | string | Yes* | Alternative: GitHub org |
 | `githubRepo` | string | Yes* | Alternative: GitHub repo |
 | `branchName` | string | No** | Git branch name |
-| `jobType` | string | No | `"code"` (default) or `"task"` |
+| `jobType` | string | No | `"code"` (default), `"task"`, or `"ralph"` |
 | `featureId` | string | No | Feature UUID |
 | `repositoryId` | string | No | Repository UUID |
 | `title` | string | No | Job title |
 | `createdByTeamMemberId` | string | No | Team member UUID |
+| `maxIterations` | number | No | Ralph only: max iterations (1-100, default: 10) |
+| `completionPromise` | string | No | Ralph only: string that signals completion (default: "RALPH_COMPLETE") |
+| `feedbackCommands` | string[] | No | Ralph only: commands to run between iterations (e.g., `["npm test"]`) |
 
 \* Either `clientId` OR `githubOrg`/`githubRepo` is required.
-\** Required for `code` jobs. Auto-generated for `task` jobs.
+\** Required for `code` jobs. Auto-generated for `task` and `ralph` jobs.
 
 **Response:**
 ```json
@@ -258,6 +262,73 @@ End an interactive task job session and mark it as completed.
 ```
 
 The job will be marked as `completed` once Claude finishes processing.
+
+---
+
+## Ralph Loop Jobs
+
+Ralph jobs (`jobType: "ralph"`) run Claude in a loop until completion. Each iteration:
+1. Reads progress from previous iterations
+2. Runs Claude with the task
+3. Runs feedback commands (tests, lint) if configured
+4. Updates progress file
+5. Checks for completion promise
+
+A single commit and PR are created at the end with all accumulated changes.
+
+### GET /jobs/:id/iterations
+Get iteration history for a ralph job.
+
+**Response:**
+```json
+{
+  "jobId": "uuid",
+  "currentIteration": 3,
+  "maxIterations": 10,
+  "completionReason": "promise_detected",
+  "iterations": [
+    {
+      "id": "uuid",
+      "iterationNumber": 1,
+      "startedAt": "2026-01-09T10:00:00Z",
+      "completedAt": "2026-01-09T10:05:00Z",
+      "exitCode": 0,
+      "error": null,
+      "promiseDetected": false,
+      "outputSummary": "Created initial scaffold...",
+      "feedbackResults": [
+        { "command": "npm test", "exitCode": 0, "passed": true }
+      ]
+    }
+  ]
+}
+```
+
+### POST /jobs/:id/stop
+Gracefully stop a ralph job after the current iteration completes. The job will create a PR with partial work.
+
+**Response:**
+```json
+{
+  "id": "uuid",
+  "message": "Stop requested - job will complete after current iteration and create PR with partial work"
+}
+```
+
+**Errors:**
+| Code | Description |
+|------|-------------|
+| 400 | Not a ralph job, or job not running |
+| 404 | Job not found |
+
+### Completion Reasons
+
+| Reason | Description |
+|--------|-------------|
+| `promise_detected` | Claude output the completion promise string |
+| `max_iterations` | Reached maximum iterations without completion |
+| `manual_stop` | User called `/jobs/:id/stop` |
+| `iteration_error` | An iteration failed after retry |
 
 ---
 
@@ -399,6 +470,52 @@ curl -X POST http://localhost:3456/jobs/abc123/message \
 # 5. When done, complete the session
 curl -X POST http://localhost:3456/jobs/abc123/complete \
   -H "Authorization: Bearer $SECRET"
+```
+
+---
+
+## Example: Ralph Loop Workflow
+
+```bash
+# 1. Create a ralph job with feedback commands
+curl -X POST http://localhost:3456/jobs \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientId": "14cddf8f-ce78-4b49-9eb4-9d17a7d1f568",
+    "prompt": "Implement a user authentication system with login, logout, and session management. Include tests. Output RALPH_COMPLETE when done.",
+    "branchName": "feature/auth-system",
+    "jobType": "ralph",
+    "maxIterations": 10,
+    "completionPromise": "RALPH_COMPLETE",
+    "feedbackCommands": ["npm test", "npm run lint"]
+  }'
+
+# Response:
+# {
+#   "id": "abc123",
+#   "status": "queued",
+#   "jobType": "ralph",
+#   "maxIterations": 10,
+#   "completionPromise": "RALPH_COMPLETE"
+# }
+
+# 2. Monitor iterations
+curl "http://localhost:3456/jobs/abc123/iterations" \
+  -H "Authorization: Bearer $SECRET"
+
+# 3. (Optional) Stop early if needed
+curl -X POST http://localhost:3456/jobs/abc123/stop \
+  -H "Authorization: Bearer $SECRET"
+
+# 4. Check final job status
+curl "http://localhost:3456/jobs/abc123" \
+  -H "Authorization: Bearer $SECRET"
+
+# Response includes:
+# - completion_reason: "promise_detected" | "max_iterations" | "manual_stop"
+# - total_iterations: number of iterations completed
+# - pr_url: link to created PR
 ```
 
 ---

@@ -241,7 +241,7 @@ export async function createPullRequest(
 ): Promise<{ url: string; number: number; title: string; filesChanged: number }> {
   const title = job.title || job.branch_name;
   const body = [
-    'Automated by Claude Code Agent',
+    'Automated by OpsKings Development Intelligence',
     '',
     job.feature_id ? `Feature ID: ${job.feature_id}` : null,
     `Job ID: ${job.id}`
