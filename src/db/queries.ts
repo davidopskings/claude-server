@@ -534,17 +534,18 @@ export async function syncTodosFromPrd(
     const orderIndex = story.id - 1; // Convert 1-indexed story ID to 0-indexed order_index
     const status = story.passes ? 'done' : 'pending';
 
-    const { error, count } = await supabase
+    const { error, data } = await supabase
       .from('todos')
       .update({
         status,
         updated_at: new Date().toISOString()
       })
       .eq('feature_id', featureId)
-      .eq('order_index', orderIndex);
+      .eq('order_index', orderIndex)
+      .select('id');
 
     if (error) throw error;
-    if (count && count > 0) updated++;
+    if (data && data.length > 0) updated++;
   }
   return { updated };
 }

@@ -9,6 +9,20 @@ Authorization: Bearer <AGENT_API_SECRET>
 
 ---
 
+## Table of Contents
+
+- [Health](#health)
+- [Clients](#clients)
+- [Features](#features)
+- [Jobs](#jobs)
+- [Interactive Task Jobs](#interactive-task-jobs)
+- [Ralph Loop Jobs](#ralph-loop-jobs)
+- [PRD Mode (Ralph Wiggum)](#prd-mode-ralph-wiggum)
+- [Queue](#queue)
+- [Repository Management](#repository-management)
+
+---
+
 ## Health
 
 ### GET /health
@@ -88,6 +102,68 @@ Add a GitHub repository to a client.
   "defaultBranch": "main"
 }
 ```
+
+---
+
+## Features
+
+### POST /features/:featureId/generate-tasks
+Generate a PRD and development tasks for a feature using AI.
+
+This endpoint:
+1. Fetches the feature details from the database
+2. Uses Claude to generate a PRD with user stories
+3. Creates todos in the database for each task
+4. Stores the PRD on the feature record
+
+**Request Body:**
+```json
+{
+  "clearExisting": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `clearExisting` | boolean | No | If true, deletes existing todos before creating new ones |
+
+**Response:**
+```json
+{
+  "featureId": "uuid",
+  "featureTitle": "User Authentication",
+  "prd": {
+    "overview": "A comprehensive user authentication system...",
+    "userStories": [
+      {
+        "id": "US-1",
+        "title": "User Registration",
+        "description": "As a new user, I want to create an account...",
+        "acceptanceCriteria": [
+          "Email validation is performed",
+          "Password meets strength requirements"
+        ]
+      }
+    ],
+    "outOfScope": ["Social login", "2FA"],
+    "technicalNotes": "Use bcrypt for password hashing..."
+  },
+  "tasks": [
+    {
+      "title": "Implement registration endpoint",
+      "description": "Create POST /auth/register...",
+      "orderIndex": 0
+    }
+  ],
+  "todosCreated": 5
+}
+```
+
+**Errors:**
+| Code | Description |
+|------|-------------|
+| 404 | Feature not found |
+| 500 | PRD generation failed |
 
 ---
 
@@ -177,10 +253,10 @@ Create a new job.
 | `title` | string | No | Job title |
 | `createdByTeamMemberId` | string | No | Team member UUID |
 | `maxIterations` | number | No | Ralph only: max iterations (1-100, default: 10) |
-| `completionPromise` | string | No | Ralph only: string that signals completion (default: "RALPH_COMPLETE") |
-| `feedbackCommands` | string[] | No | Ralph only: commands to run between iterations (e.g., `["npm test"]`) |
+| `completionPromise` | string | No | Ralph only: string that signals completion (default: `<promise>COMPLETE</promise>`) |
+| `feedbackCommands` | string[] | No | Ralph only: deprecated, Claude runs tests itself |
 | `prdMode` | boolean | No | Ralph only: enable PRD mode for story-based development |
-| `prd` | object | No | Ralph PRD mode: PRD object with stories (required if prdMode is true) |
+| `prd` | object | No | Ralph PRD mode: PRD object with stories. If omitted with `prdMode: true`, loads from `featureId` |
 
 \* Either `clientId` OR `githubOrg`/`githubRepo` is required.
 \** Required for `code` jobs. Auto-generated for `task` and `ralph` jobs.
@@ -327,25 +403,40 @@ Gracefully stop a ralph job after the current iteration completes. The job will 
 
 | Reason | Description |
 |--------|-------------|
-| `promise_detected` | Claude output the completion promise string |
+| `promise_detected` | Claude output `<promise>COMPLETE</promise>` (all stories done) |
 | `max_iterations` | Reached maximum iterations without completion |
 | `manual_stop` | User called `/jobs/:id/stop` |
 | `iteration_error` | An iteration failed after retry |
-| `all_stories_complete` | PRD mode only: all stories have passes: true |
 
 ---
 
-## PRD Mode (Story-Based Development)
+## PRD Mode (Ralph Wiggum)
 
-PRD mode is a variant of Ralph jobs that works with discrete user stories. Instead of a single completion promise, Claude works through stories one at a time, committing after each story is complete.
+PRD mode is an autonomous development pattern where Claude works through user stories independently. Named after the original "Ralph" pattern, it follows these principles:
 
-### How PRD Mode Works
+- **Claude runs everything** - tests, linting, commits, story updates
+- **Orchestrator just loops** - until `<promise>COMPLETE</promise>` signal or max iterations
+- **Fresh context per iteration** - each iteration is a new Claude session
+- **Progress persisted in files** - `prd.json` and `progress.txt` in the worktree
 
-1. A `prd.json` file is written to the worktree with all stories
-2. Claude works on the first incomplete story
-3. When Claude marks a story as complete (sets `passes: true` in prd.json), the orchestrator creates a commit
-4. This continues until all stories are complete or max iterations is reached
-5. A single PR is created containing all per-story commits
+### How It Works
+
+1. **Setup**: Orchestrator writes `prd.json` and `progress.txt` to the worktree
+2. **Iteration Loop**:
+   - Claude reads `prd.json` to find next incomplete story (`passes: false`)
+   - Claude reads `progress.txt` to learn from previous iterations
+   - Claude implements the story, runs quality checks (typecheck, lint, test)
+   - If checks pass, Claude commits and updates `prd.json` to set `passes: true`
+   - Claude appends learnings to `progress.txt`
+3. **Completion**: When all stories have `passes: true`, Claude outputs `<promise>COMPLETE</promise>`
+4. **PR Creation**: Orchestrator pushes all commits and creates a PR
+
+### Key Files in Worktree
+
+| File | Purpose |
+|------|---------|
+| `prd.json` | Stories with completion status - Claude updates this |
+| `progress.txt` | Learnings and patterns - Claude appends to this |
 
 ### PRD Object Structure
 
@@ -360,8 +451,7 @@ PRD mode is a variant of Ralph jobs that works with discrete user stories. Inste
       "description": "Allow new users to create accounts",
       "acceptanceCriteria": [
         "Email validation",
-        "Password strength requirements",
-        "Duplicate email prevention"
+        "Password strength requirements"
       ],
       "passes": false
     },
@@ -379,33 +469,50 @@ PRD mode is a variant of Ralph jobs that works with discrete user stories. Inste
 }
 ```
 
+### What Claude Does Each Iteration
+
+1. Reads `prd.json` and `progress.txt`
+2. Installs dependencies if needed (checks for node_modules, etc.)
+3. Picks highest priority story where `passes: false`
+4. Implements the story
+5. Runs quality checks (discovers commands from package.json, etc.)
+6. If checks fail: fixes issues and re-runs until they pass
+7. If checks pass: commits with message `feat: [Story ID] - [Story Title]`
+8. Updates `prd.json` to set story's `passes: true`
+9. Appends progress and learnings to `progress.txt`
+10. If all stories complete: outputs `<promise>COMPLETE</promise>`
+
 ### PRD Progress Tracking
 
 The job's `prd_progress` field tracks:
 
 ```json
 {
-  "currentStoryId": 2,
-  "completedStoryIds": [1],
+  "currentStoryId": null,
+  "completedStoryIds": [1, 2],
   "commits": [
     {
       "storyId": 1,
       "sha": "abc123...",
-      "message": "feat(story-1): User registration",
+      "message": "feat: 1 - User registration",
       "timestamp": "2026-01-09T10:05:00Z"
     }
   ]
 }
 ```
 
-### Per-Story Commits
+### Side Effects on Completion
 
-Each completed story results in a commit with the format:
-```
-feat(story-{id}): {story title}
-```
+When a PRD job completes successfully:
+- All todos linked to the feature are updated to status `"done"`
+- Feature's `feature_workflow_stage_id` is updated to "Ready for Review"
 
-This provides a clean git history where each commit corresponds to a discrete piece of functionality.
+### Branch Name Generation
+
+If no `branchName` is provided but a `featureId` is:
+- Branch name is auto-generated from feature title and type
+- Format: `{type-prefix}/{slug}` (e.g., `feature/user-authentication`, `fix/login-bug`)
+- Type prefixes: `feature`, `fix`, `func`, `cosmetic`
 
 ---
 
@@ -597,79 +704,110 @@ curl "http://localhost:3456/jobs/abc123" \
 
 ---
 
-## Example: PRD Mode Workflow
+## Example: PRD Mode Workflow (Full Flow)
+
+The recommended workflow is to first generate a PRD from a feature, then run a Ralph job.
 
 ```bash
-# 1. Create a ralph job in PRD mode with stories
+# Step 1: Generate PRD and tasks from a feature
+curl -X POST http://localhost:3456/features/FEATURE_ID/generate-tasks \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Response:
+# {
+#   "featureId": "abc123",
+#   "featureTitle": "User Authentication",
+#   "prd": { ... },
+#   "tasks": [ ... ],
+#   "todosCreated": 5
+# }
+
+# Step 2: Start a Ralph PRD job using the feature (PRD/todos loaded automatically)
+curl -X POST http://localhost:3456/jobs \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "featureId": "abc123",
+    "prompt": "Implement the feature according to the PRD.",
+    "jobType": "ralph",
+    "maxIterations": 20,
+    "prdMode": true
+  }'
+
+# Response (branch name auto-generated from feature):
+# {
+#   "id": "job456",
+#   "status": "queued",
+#   "jobType": "ralph",
+#   "prdMode": true,
+#   "branchName": "feature/user-authentication",
+#   "maxIterations": 20
+# }
+
+# Step 3: Monitor iterations
+curl "http://localhost:3456/jobs/job456/iterations" \
+  -H "Authorization: Bearer $SECRET"
+
+# Step 4: Check job status and progress
+curl "http://localhost:3456/jobs/job456" \
+  -H "Authorization: Bearer $SECRET"
+
+# Response includes:
+# {
+#   "status": "running",
+#   "prd_progress": {
+#     "completedStoryIds": [1, 2],
+#     "commits": [
+#       { "storyId": 1, "sha": "abc123", "message": "feat: 1 - User registration" },
+#       { "storyId": 2, "sha": "def456", "message": "feat: 2 - User login" }
+#     ]
+#   }
+# }
+
+# When complete:
+# - PR is created with all commits
+# - Feature todos are updated to status "done"
+# - Feature workflow stage is updated to "Ready for Review"
+```
+
+### Alternative: Provide PRD Directly
+
+You can also provide the PRD object directly instead of using a feature:
+
+```bash
 curl -X POST http://localhost:3456/jobs \
   -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" \
   -d '{
     "clientId": "14cddf8f-ce78-4b49-9eb4-9d17a7d1f568",
-    "prompt": "Implement the user authentication system as described in the PRD. Work through each story sequentially.",
+    "prompt": "Implement the auth system as described in the PRD.",
     "branchName": "feature/auth-system",
     "jobType": "ralph",
     "maxIterations": 15,
     "prdMode": true,
     "prd": {
       "title": "User Authentication",
-      "description": "Complete auth system with registration and login",
+      "description": "Complete auth system",
       "stories": [
         {
           "id": 1,
           "title": "User registration endpoint",
           "description": "POST /auth/register with email/password",
-          "acceptanceCriteria": ["Email validation", "Password hashing", "Duplicate prevention"],
+          "acceptanceCriteria": ["Email validation", "Password hashing"],
           "passes": false
         },
         {
           "id": 2,
           "title": "User login endpoint",
           "description": "POST /auth/login returns JWT",
-          "acceptanceCriteria": ["JWT generation", "Invalid credentials handling"],
-          "passes": false
-        },
-        {
-          "id": 3,
-          "title": "Auth middleware",
-          "description": "Protect routes with JWT verification",
-          "acceptanceCriteria": ["Token validation", "401 on invalid/expired"],
+          "acceptanceCriteria": ["JWT generation", "Error handling"],
           "passes": false
         }
       ]
-    },
-    "feedbackCommands": ["npm test", "npm run lint"]
+    }
   }'
-
-# Response:
-# {
-#   "id": "abc123",
-#   "status": "queued",
-#   "jobType": "ralph",
-#   "prdMode": true,
-#   "maxIterations": 15
-# }
-
-# 2. Monitor progress - each completed story creates a commit
-curl "http://localhost:3456/jobs/abc123" \
-  -H "Authorization: Bearer $SECRET"
-
-# Response includes prd_progress:
-# {
-#   "prd_progress": {
-#     "currentStoryId": 2,
-#     "completedStoryIds": [1],
-#     "commits": [
-#       { "storyId": 1, "sha": "abc123", "message": "feat(story-1): User registration endpoint" }
-#     ]
-#   }
-# }
-
-# 3. When complete, PR contains one commit per story
-# Git log will show:
-# - feat(story-3): Auth middleware
-# - feat(story-2): User login endpoint
-# - feat(story-1): User registration endpoint
 ```
 
 ---

@@ -785,23 +785,8 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
         break;
       }
 
-      // Check if Claude signaled ALL stories complete
-      if (result.promiseDetected) {
-        completionReason = 'promise_detected';
-        await addJobMessage(jobId, 'system', `Claude signaled ALL stories complete with <promise>COMPLETE</promise>`);
-
-        // Update iteration record with completion
-        await updateIteration(iteration.id, {
-          completed_at: new Date().toISOString(),
-          exit_code: result.exitCode,
-          prompt_used: iterationPrompt,
-          promise_detected: true,
-          output_summary: result.summary
-        });
-        break;
-      }
-
       // Check prd.json for newly completed stories (Claude manages this, we just track)
+      // IMPORTANT: Do this BEFORE checking promiseDetected so we track commits even if Claude completes all stories
       const updatedPrd = readPrdFile(worktreePath);
       const newlyCompleted = findNewlyCompletedStories(prdProgress.completedStoryIds, updatedPrd.stories);
 
@@ -891,7 +876,7 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
         completed_at: new Date().toISOString(),
         exit_code: result.exitCode,
         prompt_used: iterationPrompt,
-        promise_detected: newlyCompleted.length > 0,
+        promise_detected: result.promiseDetected || newlyCompleted.length > 0,
         output_summary: result.summary
       });
 
@@ -899,6 +884,13 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
       appendPrdIterationToProgress(worktreePath, i, result.summary, newlyCompleted, []);
 
       await addJobMessage(jobId, 'system', `Iteration ${i} complete. Completed stories: ${prdProgress.completedStoryIds.length}/${prd.stories.length}`);
+
+      // Check if Claude signaled ALL stories complete - break AFTER tracking commits
+      if (result.promiseDetected) {
+        completionReason = 'promise_detected';
+        await addJobMessage(jobId, 'system', `Claude signaled ALL stories complete with <promise>COMPLETE</promise>`);
+        break;
+      }
     }
 
     // Reached max iterations without completing all stories
@@ -1157,8 +1149,20 @@ If ALL stories are complete and passing, reply with:
 
 If there are still stories with \`passes: false\`, end your response normally (another iteration will pick up the next story).
 
-## Important
-- Work on ONE story per iteration
+## CRITICAL: One Story Per Iteration
+**You MUST only work on ONE story per iteration. This is non-negotiable.**
+
+After completing ONE story:
+1. Commit your changes
+2. Update prd.json to mark that ONE story as \`passes: true\`
+3. Update progress.txt
+4. Check if ALL stories are now complete
+5. If all complete: output \`<promise>COMPLETE</promise>\`
+6. If not all complete: **STOP IMMEDIATELY** - do NOT continue to the next story
+
+The orchestrator will start a new iteration for the next story. Do NOT try to be efficient by doing multiple stories - this breaks the tracking system.
+
+## Other Guidelines
 - Commit frequently
 - Keep CI green
 - Read the Codebase Patterns section in progress.txt before starting
