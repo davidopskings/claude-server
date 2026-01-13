@@ -250,6 +250,19 @@ export async function createCodeBranch(branch: {
   name: string;
   url?: string;
 }): Promise<{ id: string }> {
+  // First check if branch already exists
+  const { data: existing } = await supabase
+    .from('code_branches')
+    .select('id')
+    .eq('repository_id', branch.repositoryId)
+    .eq('name', branch.name)
+    .single();
+
+  if (existing) {
+    return existing;
+  }
+
+  // Create new branch record
   const insert: CodeBranchInsert = {
     repository_id: branch.repositoryId,
     feature_id: branch.featureId,
@@ -276,6 +289,19 @@ export async function createCodePullRequest(pr: {
   status?: string;
   url: string;
 }): Promise<{ id: string }> {
+  // First check if PR already exists by number and repository
+  const { data: existing } = await supabase
+    .from('code_pull_requests')
+    .select('id')
+    .eq('repository_id', pr.repositoryId)
+    .eq('number', pr.number)
+    .single();
+
+  if (existing) {
+    return existing;
+  }
+
+  // Create new PR record
   const insert: CodePullRequestInsert = {
     repository_id: pr.repositoryId,
     feature_id: pr.featureId,

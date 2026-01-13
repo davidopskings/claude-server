@@ -249,14 +249,35 @@ export async function createPullRequest(
 
   console.log(`Creating pull request for ${job.branch_name}...`);
 
-  // Create PR using GitHub CLI
-  const prUrl = execSync(
-    `gh pr create --title "${title.replace(/"/g, '\\"')}" --body "${body.replace(/"/g, '\\"')}" --head ${job.branch_name} --base ${repo.default_branch || 'main'}`,
-    { cwd: worktreePath, encoding: 'utf-8' }
-  ).trim();
+  let prUrl: string;
+  let prNumber: number;
 
-  // Parse PR number from URL
-  const prNumber = parseInt(prUrl.split('/').pop() || '0');
+  // Check if PR already exists for this branch
+  try {
+    const existingPr = execSync(
+      `gh pr view ${job.branch_name} --json url,number --jq '"\(.url) \(.number)"'`,
+      { cwd: worktreePath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+
+    if (existingPr) {
+      const [url, num] = existingPr.split(' ');
+      prUrl = url;
+      prNumber = parseInt(num) || 0;
+      console.log(`PR already exists for branch ${job.branch_name}: ${prUrl}`);
+    } else {
+      throw new Error('No existing PR found');
+    }
+  } catch {
+    // No existing PR, create a new one
+    prUrl = execSync(
+      `gh pr create --title "${title.replace(/"/g, '\\"')}" --body "${body.replace(/"/g, '\\"')}" --head ${job.branch_name} --base ${repo.default_branch || 'main'}`,
+      { cwd: worktreePath, encoding: 'utf-8' }
+    ).trim();
+
+    // Parse PR number from URL
+    prNumber = parseInt(prUrl.split('/').pop() || '0');
+    console.log(`Created PR #${prNumber}: ${prUrl}`);
+  }
 
   // Get files changed
   let filesChanged = 0;
@@ -269,8 +290,6 @@ export async function createPullRequest(
   } catch {
     // Ignore error getting files changed
   }
-
-  console.log(`Created PR #${prNumber}: ${prUrl}`);
 
   return {
     url: prUrl,
