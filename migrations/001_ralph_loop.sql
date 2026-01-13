@@ -38,3 +38,19 @@ COMMENT ON COLUMN agent_jobs.current_iteration IS 'Current iteration number for 
 COMMENT ON COLUMN agent_jobs.total_iterations IS 'Final iteration count when job completes';
 COMMENT ON COLUMN agent_jobs.completion_reason IS 'Why ralph job ended: promise_detected, max_iterations, manual_stop, iteration_error';
 COMMENT ON COLUMN agent_jobs.feedback_commands IS 'JSON array of commands to run between iterations';
+
+-- 5. Add PRD mode columns to agent_jobs
+ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS prd_mode boolean DEFAULT false;
+ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS prd jsonb;
+ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS prd_progress jsonb;
+
+COMMENT ON COLUMN agent_jobs.prd_mode IS 'Whether this ralph job uses PRD mode with discrete stories';
+COMMENT ON COLUMN agent_jobs.prd IS 'PRD document with stories for PRD mode jobs';
+COMMENT ON COLUMN agent_jobs.prd_progress IS 'Progress tracking for PRD mode: current story, completed stories, commits';
+
+-- 6. Add story_id to iterations for PRD mode tracking
+ALTER TABLE agent_job_iterations ADD COLUMN IF NOT EXISTS story_id integer;
+ALTER TABLE agent_job_iterations ADD COLUMN IF NOT EXISTS commit_sha text;
+
+COMMENT ON COLUMN agent_job_iterations.story_id IS 'PRD story ID this iteration worked on';
+COMMENT ON COLUMN agent_job_iterations.commit_sha IS 'Git commit SHA created after this iteration (PRD mode)';

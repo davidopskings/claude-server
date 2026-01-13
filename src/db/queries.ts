@@ -11,7 +11,10 @@ import type {
   CodeBranchInsert,
   CodePullRequestInsert,
   JobWithDetails,
-  ClientWithRepositories
+  ClientWithRepositories,
+  Prd,
+  PrdProgress,
+  PrdCommit
 } from './types.js';
 
 // ----- Repositories -----
@@ -170,6 +173,9 @@ export async function createJob(job: {
   maxIterations?: number;
   completionPromise?: string;
   feedbackCommands?: string[];
+  // PRD mode fields
+  prdMode?: boolean;
+  prd?: Prd;
 }): Promise<AgentJob> {
   const insert: AgentJobInsert = {
     client_id: job.clientId,
@@ -184,7 +190,15 @@ export async function createJob(job: {
     // Ralph-specific fields
     max_iterations: job.maxIterations,
     completion_promise: job.completionPromise,
-    feedback_commands: job.feedbackCommands
+    feedback_commands: job.feedbackCommands,
+    // PRD mode fields
+    prd_mode: job.prdMode,
+    prd: job.prd ? JSON.parse(JSON.stringify(job.prd)) : undefined,
+    prd_progress: job.prdMode ? JSON.parse(JSON.stringify({
+      currentStoryId: null,
+      completedStoryIds: [],
+      commits: []
+    } as PrdProgress)) : undefined
   };
 
   const { data, error } = await supabase
@@ -360,4 +374,248 @@ export async function getJobIterations(jobId: string): Promise<AgentJobIteration
     .order('iteration_number', { ascending: true });
 
   return data || [];
+}
+
+// ----- PRD Mode Helpers -----
+
+export async function updatePrdProgress(
+  jobId: string,
+  progress: PrdProgress
+): Promise<void> {
+  const { error } = await supabase
+    .from('agent_jobs')
+    .update({
+      prd_progress: JSON.parse(JSON.stringify(progress)),
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', jobId);
+
+  if (error) throw error;
+}
+
+// ----- Features -----
+
+export interface FeatureWithClient {
+  id: string;
+  title: string;
+  client_id: string;
+  functionality_notes: string | null;
+  client_context: string | null;
+  client: { id: string; name: string } | null;
+}
+
+export async function getFeature(featureId: string): Promise<FeatureWithClient | null> {
+  const { data } = await supabase
+    .from('features')
+    .select(`
+      id,
+      title,
+      client_id,
+      functionality_notes,
+      client_context,
+      client:clients(id, name)
+    `)
+    .eq('id', featureId)
+    .single();
+
+  return data as FeatureWithClient | null;
+}
+
+export async function updateFeaturePrd(
+  featureId: string,
+  prd: object
+): Promise<void> {
+  // Note: prd column added via migration 002_feature_prd.sql
+  const { error } = await supabase
+    .from('features')
+    .update({
+      prd: JSON.parse(JSON.stringify(prd)),
+      updated_at: new Date().toISOString()
+    } as any)
+    .eq('id', featureId);
+
+  if (error) throw error;
+}
+
+// ----- Todos -----
+
+export interface TodoInsert {
+  feature_id: string;
+  title: string;
+  description?: string;
+  status?: string;
+  order_index?: number;
+}
+
+export async function createTodos(todos: TodoInsert[]): Promise<{ id: string }[]> {
+  const { data, error } = await supabase
+    .from('todos')
+    .insert(todos.map(t => ({
+      feature_id: t.feature_id,
+      title: t.title,
+      description: t.description,
+      status: t.status || 'pending',
+      order_index: t.order_index
+    })))
+    .select('id');
+
+  if (error) throw error;
+  return data || [];
+}
+
+export async function deleteTodosByFeatureId(featureId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from('todos')
+    .delete()
+    .eq('feature_id', featureId)
+    .select('id');
+
+  if (error) throw error;
+  return data?.length || 0;
+}
+
+export async function getTodosByFeatureId(featureId: string): Promise<{
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  order_index: number | null;
+}[]> {
+  const { data, error } = await supabase
+    .from('todos')
+    .select('id, title, description, status, order_index')
+    .eq('feature_id', featureId)
+    .order('order_index', { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+export async function updateTodoStatus(
+  todoId: string,
+  status: string
+): Promise<void> {
+  const { error } = await supabase
+    .from('todos')
+    .update({
+      status,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', todoId);
+
+  if (error) throw error;
+}
+
+export async function updateTodoStatusByFeatureAndOrder(
+  featureId: string,
+  orderIndex: number,
+  status: string
+): Promise<void> {
+  const { error } = await supabase
+    .from('todos')
+    .update({
+      status,
+      updated_at: new Date().toISOString()
+    })
+    .eq('feature_id', featureId)
+    .eq('order_index', orderIndex);
+
+  if (error) throw error;
+}
+
+// Sync all todos from PRD stories at end of Ralph job
+// Converts 1-indexed story IDs to 0-indexed order_index
+export async function syncTodosFromPrd(
+  featureId: string,
+  stories: { id: number; passes: boolean }[]
+): Promise<{ updated: number }> {
+  let updated = 0;
+  for (const story of stories) {
+    const orderIndex = story.id - 1; // Convert 1-indexed story ID to 0-indexed order_index
+    const status = story.passes ? 'done' : 'pending';
+
+    const { error, count } = await supabase
+      .from('todos')
+      .update({
+        status,
+        updated_at: new Date().toISOString()
+      })
+      .eq('feature_id', featureId)
+      .eq('order_index', orderIndex);
+
+    if (error) throw error;
+    if (count && count > 0) updated++;
+  }
+  return { updated };
+}
+
+// Get feature with PRD and todos for Ralph job integration
+export interface FeatureWithPrdAndTodos {
+  id: string;
+  title: string;
+  client_id: string;
+  functionality_notes: string | null;
+  client_context: string | null;
+  prd: object | null;
+  client: { id: string; name: string } | null;
+  todos: {
+    id: string;
+    title: string;
+    description: string | null;
+    status: string;
+    order_index: number | null;
+  }[];
+}
+
+export async function getFeatureWithPrdAndTodos(featureId: string): Promise<FeatureWithPrdAndTodos | null> {
+  // Note: prd column added via migration 002_feature_prd.sql
+  // TypeScript types may not include it yet, so we cast the result
+  const { data: feature } = await supabase
+    .from('features')
+    .select(`
+      id,
+      title,
+      client_id,
+      functionality_notes,
+      client_context,
+      prd,
+      feature_type_id,
+      client:clients(id, name)
+    `)
+    .eq('id', featureId)
+    .single() as { data: {
+      id: string;
+      title: string;
+      client_id: string;
+      functionality_notes: string | null;
+      client_context: string | null;
+      prd: object | null;
+      feature_type_id: string | null;
+      client: { id: string; name: string } | null;
+    } | null };
+
+  if (!feature) return null;
+
+  const todos = await getTodosByFeatureId(featureId);
+
+  return {
+    ...feature,
+    todos
+  };
+}
+
+// Update feature workflow stage
+export async function updateFeatureWorkflowStage(
+  featureId: string,
+  workflowStageId: string
+): Promise<void> {
+  const { error } = await supabase
+    .from('features')
+    .update({
+      feature_workflow_stage_id: workflowStageId,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', featureId);
+
+  if (error) throw error;
 }

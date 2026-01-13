@@ -304,6 +304,46 @@ export function hasChanges(worktreePath: string): boolean {
   }
 }
 
+// Commit with a custom message and return the commit SHA
+export function commitWithMessage(
+  worktreePath: string,
+  message: string
+): { sha: string; hasChanges: boolean } {
+  // Stage all changes
+  execSync('git add -A', { cwd: worktreePath, stdio: 'pipe' });
+
+  // Check if there are changes to commit
+  try {
+    execSync('git diff --cached --quiet', { cwd: worktreePath, stdio: 'pipe' });
+    // No changes to commit
+    return { sha: '', hasChanges: false };
+  } catch {
+    // Has changes - commit them
+    console.log(`Committing: ${message}`);
+    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
+      cwd: worktreePath,
+      stdio: 'pipe'
+    });
+
+    // Get the commit SHA
+    const sha = execSync('git rev-parse HEAD', {
+      cwd: worktreePath,
+      encoding: 'utf-8'
+    }).trim();
+
+    return { sha, hasChanges: true };
+  }
+}
+
+// Push without creating a PR
+export function pushBranch(worktreePath: string, branchName: string): void {
+  console.log(`Pushing branch ${branchName}...`);
+  execSync(`git push -u origin ${branchName}`, {
+    cwd: worktreePath,
+    stdio: 'pipe'
+  });
+}
+
 export async function checkGitAuth(): Promise<{ authenticated: boolean; user: string | null }> {
   try {
     const output = execSync('gh auth status 2>&1', { encoding: 'utf-8' });

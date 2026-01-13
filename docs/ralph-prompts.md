@@ -299,6 +299,15 @@ Started: 2026-01-09T10:00:00Z
 
 ---
 
+## Codebase Patterns
+<!-- Patterns discovered during this job - persists across iterations -->
+- Tests use Jest with ts-jest preset
+- Database queries are in src/db/queries.ts
+- Auth middleware is at src/middleware/auth.ts
+- Run `npm run db:migrate` before tests if schema changed
+
+---
+
 ## Iteration 1
 Completed: 2026-01-09T10:05:00Z
 
@@ -342,6 +351,60 @@ Completed: 2026-01-09T10:18:00Z
 
 ---
 ```
+
+---
+
+## Learning Accumulation
+
+Ralph jobs include built-in mechanisms for Claude to accumulate knowledge across iterations and even across jobs.
+
+### Codebase Patterns Section
+
+The progress file includes a `## Codebase Patterns` section that Claude is instructed to update as it discovers important patterns:
+
+```markdown
+## Codebase Patterns
+- Tests use Jest with ts-jest preset
+- Database queries are in src/db/queries.ts
+- Auth middleware is at src/middleware/auth.ts
+- Run `npm run db:migrate` before tests if schema changed
+```
+
+This helps later iterations avoid re-discovering the same things.
+
+### AGENTS.md for Permanent Learning
+
+Claude is instructed to create/update `AGENTS.md` in the repo root when it discovers patterns that should persist beyond the current job:
+
+```markdown
+# AGENTS.md
+
+## Testing
+- Use Jest with ts-jest
+- Mock database with `jest.mock('./db')`
+- Integration tests need TEST_DB_URL env var
+
+## Architecture
+- Controllers in src/controllers/
+- Services in src/services/
+- Queries in src/db/queries.ts
+
+## Common Pitfalls
+- Always await async operations in tests
+- Use `beforeEach` to reset mocks
+```
+
+This file persists in the repo and helps future Ralph jobs (and human developers) understand the codebase conventions.
+
+### When to Add Patterns
+
+Claude should add patterns when discovering:
+- Testing conventions and how to run tests
+- File structure and where things belong
+- Required environment variables
+- Common commands (`npm run db:migrate`, etc.)
+- Architecture decisions and patterns used
+- Gotchas and common mistakes
 
 ---
 
@@ -569,3 +632,151 @@ curl -X POST http://localhost:3456/jobs/{id}/stop \
 1. Check job.error field
 2. Verify git credentials
 3. Check gh auth status
+
+---
+
+## PRD Mode
+
+PRD mode is an alternative to prompt-based Ralph jobs. Instead of using a completion promise, you define discrete user stories. Claude works through them one at a time, and the orchestrator creates a commit after each story is completed.
+
+### When to Use PRD Mode
+
+- Large features that can be broken into discrete stories
+- When you want per-story commits for cleaner git history
+- When acceptance criteria are well-defined upfront
+- For better progress visibility (X of Y stories complete)
+
+### PRD Structure
+
+```json
+{
+  "title": "Feature Name",
+  "description": "Overall feature description",
+  "stories": [
+    {
+      "id": 1,
+      "title": "Short story title",
+      "description": "Detailed description",
+      "acceptanceCriteria": [
+        "Criterion 1",
+        "Criterion 2"
+      ],
+      "passes": false
+    }
+  ]
+}
+```
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        PRD MODE FLOW                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Write prd.json to worktree                                  │
+│  2. Initialize progress file with story checklist               │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                   ITERATION LOOP                        │    │
+│  │                                                         │    │
+│  │  a. Check prd.json for incomplete stories               │    │
+│  │  b. Build prompt with story status                      │    │
+│  │  c. Run Claude (work on first TODO story)               │    │
+│  │  d. Run feedback commands (tests, lint)                 │    │
+│  │  e. Check prd.json for newly completed stories          │    │
+│  │  f. Commit for each completed story                     │    │
+│  │  g. Continue until: all_complete | max_iterations       │    │
+│  │                                                         │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                 │
+│  3. git push (all per-story commits)                            │
+│  4. gh pr create                                                │
+│  5. Cleanup worktree                                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### PRD Mode Prompt Template
+
+Claude receives this context each iteration:
+
+```
+## PRD Mode Context
+- Iteration: {n} of {max}
+- PRD: "{prd.title}"
+- Stories completed: {done}/{total}
+- Working on: Story #{id} - {title}
+
+## Stories Status
+[✓ DONE] Story #1: User registration
+    Acceptance Criteria:
+    - Email validation
+    - Password hashing
+
+[○ TODO] Story #2: User login
+    Acceptance Criteria:
+    - JWT generation
+    - Error handling
+
+## Previous Progress
+{content from .ralph-progress.md}
+
+## Your Task
+{your prompt}
+
+## Instructions
+1. Work on the FIRST incomplete story (marked with ○ TODO)
+2. When complete, update prd.json - set passes: true
+3. Include a "## Summary" section describing what you did
+4. Focus on ONE story at a time
+
+IMPORTANT: After completing work on a story, you MUST update prd.json
+```
+
+### Example API Request
+
+```bash
+curl -X POST http://localhost:3456/jobs \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientId": "...",
+    "prompt": "Implement the PRD stories. Follow existing patterns.",
+    "branchName": "feature/auth",
+    "jobType": "ralph",
+    "maxIterations": 15,
+    "prdMode": true,
+    "prd": {
+      "title": "User Authentication",
+      "stories": [
+        { "id": 1, "title": "Registration", "passes": false },
+        { "id": 2, "title": "Login", "passes": false },
+        { "id": 3, "title": "Logout", "passes": false }
+      ]
+    },
+    "feedbackCommands": ["npm test"]
+  }'
+```
+
+### Per-Story Commits
+
+Each completed story results in a commit:
+
+```
+feat(story-1): Registration
+feat(story-2): Login
+feat(story-3): Logout
+```
+
+This provides a clean, reviewable git history where each commit represents one discrete piece of functionality.
+
+### PRD vs Standard Ralph
+
+| Aspect | Standard Ralph | PRD Mode |
+|--------|----------------|----------|
+| Completion | Single promise string | All stories pass |
+| Commits | One at end | One per story |
+| Progress | Iteration count | Stories done/total |
+| Use case | Open-ended tasks | Well-defined features |
+| Git history | Single commit | Per-story commits |

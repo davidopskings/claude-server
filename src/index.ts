@@ -15,10 +15,38 @@ import {
   getJobIterations,
   createJob,
   updateJob,
+  getFeatureWithPrdAndTodos,
 } from './db/index.js';
 import { processQueue, getQueueStatus, cancelJob, initQueue } from './queue.js';
 import { checkClaudeAuth, cancelJob as cancelRunnerJob, sendMessageToJob, isJobInteractive, endInteractiveJob } from './runner.js';
 import { checkGitAuth, fetchAllRepos, cloneAllRepos, cloneRepo } from './git.js';
+import { generateFeaturePrd } from './prd.js';
+
+// Feature type mapping for branch name generation
+const FEATURE_TYPE_MAP: Record<string, string> = {
+  '0a083f70-3839-4ae4-af69-067c29ac29f5': 'feature',    // New Feature
+  'a8ad25d1-f452-4cec-88f9-56afc668b840': 'fix',        // Bug
+  'acd9cd67-b58f-4cdf-b588-b386d812f69c': 'cosmetic',   // Cosmetic Change Request
+  'ad217406-5c49-49cb-a433-97989af42557': 'func',       // Functionality Change Request
+};
+
+// Generate a git branch name from feature title and type
+function generateBranchName(featureTitle: string, featureTypeId?: string | null): string {
+  const typePrefix = (featureTypeId && FEATURE_TYPE_MAP[featureTypeId]) || 'feature';
+
+  // Remove client name prefix in brackets like "[ClientName] Title"
+  const titleWithoutPrefix = featureTitle.replace(/^\[.*?\]\s*/, '');
+
+  const slug = titleWithoutPrefix
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')      // Remove special chars
+    .replace(/\s+/g, '-')               // Spaces to dashes
+    .replace(/-+/g, '-')                // Collapse multiple dashes
+    .replace(/^-|-$/g, '')              // Trim leading/trailing dashes
+    .slice(0, 50);                      // Max 50 chars
+
+  return `${typePrefix}/${slug}`;
+}
 
 // Configuration
 const PORT = parseInt(process.env.PORT || '3456');
@@ -178,17 +206,17 @@ app.post('/jobs', async (req: Request, res: Response) => {
       // Ralph-specific parameters
       maxIterations,
       completionPromise,
-      feedbackCommands
+      feedbackCommands,
+      // PRD mode parameters
+      prdMode,
+      prd
     } = req.body;
 
-    // For task jobs, auto-generate branch name if not provided
-    const finalBranchName = branchName || (jobType === 'task' || jobType === 'ralph' ? `${jobType}-${Date.now()}` : null);
-
-    if (!prompt || !finalBranchName) {
-      return res.status(400).json({ error: 'prompt and branchName required' });
-    }
+    // Track loaded feature for branch name generation
+    let loadedFeature: Awaited<ReturnType<typeof getFeatureWithPrdAndTodos>> = null;
 
     // Validate ralph-specific parameters
+    let finalPrd = prd;
     if (jobType === 'ralph') {
       if (maxIterations !== undefined && (maxIterations < 1 || maxIterations > 100)) {
         return res.status(400).json({ error: 'maxIterations must be between 1 and 100' });
@@ -196,11 +224,75 @@ app.post('/jobs', async (req: Request, res: Response) => {
       if (feedbackCommands !== undefined && !Array.isArray(feedbackCommands)) {
         return res.status(400).json({ error: 'feedbackCommands must be an array of strings' });
       }
+      // Validate PRD mode
+      if (prdMode) {
+        // If featureId provided but no prd, load from database
+        if (!prd && featureId) {
+          loadedFeature = await getFeatureWithPrdAndTodos(featureId);
+          if (!loadedFeature) {
+            return res.status(404).json({ error: `Feature not found: ${featureId}` });
+          }
+          if (!loadedFeature.prd || !loadedFeature.todos || loadedFeature.todos.length === 0) {
+            return res.status(400).json({
+              error: 'Feature has no PRD or todos. Run POST /features/:featureId/generate-tasks first.'
+            });
+          }
+          // Convert todos to PRD stories format
+          finalPrd = {
+            title: loadedFeature.title,
+            description: (loadedFeature.prd as any)?.overview || loadedFeature.functionality_notes || '',
+            stories: loadedFeature.todos.map((todo, index) => ({
+              id: index + 1,
+              title: todo.title,
+              description: todo.description || '',
+              acceptanceCriteria: [],
+              passes: todo.status === 'completed'
+            }))
+          };
+          console.log(`Loaded PRD from feature ${featureId} with ${finalPrd.stories.length} stories`);
+        } else if (!prd) {
+          return res.status(400).json({ error: 'prdMode requires either prd object or featureId with existing PRD/todos' });
+        }
+
+        // Validate PRD structure (either provided or loaded from feature)
+        if (!finalPrd.stories || !Array.isArray(finalPrd.stories) || finalPrd.stories.length === 0) {
+          return res.status(400).json({ error: 'PRD must have stories array' });
+        }
+        // Validate story structure
+        for (const story of finalPrd.stories) {
+          if (typeof story.id !== 'number' || !story.title) {
+            return res.status(400).json({ error: 'Each story must have numeric id and title' });
+          }
+        }
+      }
+    }
+
+    // Generate branch name: use provided, or generate from feature, or fallback to job type + timestamp
+    let finalBranchName = branchName;
+    if (!finalBranchName && loadedFeature) {
+      finalBranchName = generateBranchName(loadedFeature.title, (loadedFeature as any).feature_type_id);
+      console.log(`Generated branch name from feature: ${finalBranchName}`);
+    }
+    if (!finalBranchName) {
+      finalBranchName = (jobType === 'task' || jobType === 'ralph') ? `${jobType}-${Date.now()}` : null;
+    }
+
+    if (!prompt || !finalBranchName) {
+      return res.status(400).json({ error: 'prompt and branchName required' });
     }
 
     // Determine client and repository
     let finalClientId = clientId;
     let finalRepositoryId = repositoryId;
+
+    // If featureId provided, get clientId from feature
+    if (!clientId && featureId) {
+      const feature = await getFeatureWithPrdAndTodos(featureId);
+      if (feature) {
+        finalClientId = feature.client_id;
+        console.log(`Got clientId ${finalClientId} from feature ${featureId}`);
+      }
+    }
 
     if (!clientId && githubOrg && githubRepo) {
       // Look up by GitHub org/repo
@@ -215,7 +307,7 @@ app.post('/jobs', async (req: Request, res: Response) => {
     }
 
     if (!finalClientId) {
-      return res.status(400).json({ error: 'clientId or githubOrg/githubRepo required' });
+      return res.status(400).json({ error: 'clientId, featureId, or githubOrg/githubRepo required' });
     }
 
     const job = await createJob({
@@ -230,7 +322,10 @@ app.post('/jobs', async (req: Request, res: Response) => {
       // Ralph-specific fields (only set for ralph jobs)
       maxIterations: jobType === 'ralph' ? (maxIterations || 10) : undefined,
       completionPromise: jobType === 'ralph' ? (completionPromise || 'RALPH_COMPLETE') : undefined,
-      feedbackCommands: jobType === 'ralph' ? feedbackCommands : undefined
+      feedbackCommands: jobType === 'ralph' ? feedbackCommands : undefined,
+      // PRD mode fields
+      prdMode: jobType === 'ralph' ? prdMode : undefined,
+      prd: jobType === 'ralph' && prdMode ? finalPrd : undefined
     });
 
     // Trigger queue processing
@@ -248,7 +343,9 @@ app.post('/jobs', async (req: Request, res: Response) => {
       // Include ralph config in response
       ...(jobType === 'ralph' && {
         maxIterations: job.max_iterations,
-        completionPromise: job.completion_promise
+        completionPromise: job.completion_promise,
+        prdMode: job.prd_mode,
+        storiesCount: prdMode ? finalPrd?.stories?.length : undefined
       })
     });
   } catch (err: any) {
@@ -467,6 +564,35 @@ app.get('/queue', async (_req: Request, res: Response) => {
     res.json(status);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ----- Features / PRD Generation -----
+
+// Generate PRD and tasks for a feature
+app.post('/features/:featureId/generate-tasks', async (req: Request, res: Response) => {
+  try {
+    const { featureId } = req.params;
+    const { clearExisting } = req.body;
+
+    console.log(`Generating PRD and tasks for feature: ${featureId}`);
+
+    const result = await generateFeaturePrd(featureId, {
+      clearExisting: clearExisting === true
+    });
+
+    res.json({
+      featureId: result.featureId,
+      featureTitle: result.featureTitle,
+      prd: result.prd,
+      tasks: result.tasks,
+      todosCreated: result.todosCreated
+    });
+  } catch (err: any) {
+    console.error('PRD generation error:', err);
+    res.status(err.message?.includes('not found') ? 404 : 500).json({
+      error: err.message
+    });
   }
 });
 

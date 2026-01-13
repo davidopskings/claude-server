@@ -113,6 +113,8 @@ export type Database = {
           output_summary: string | null
           feedback_results: Json | null
           created_at: string | null
+          story_id: number | null
+          commit_sha: string | null
         }
         Insert: {
           id?: string
@@ -128,6 +130,8 @@ export type Database = {
           output_summary?: string | null
           feedback_results?: Json | null
           created_at?: string | null
+          story_id?: number | null
+          commit_sha?: string | null
         }
         Update: {
           id?: string
@@ -143,6 +147,8 @@ export type Database = {
           output_summary?: string | null
           feedback_results?: Json | null
           created_at?: string | null
+          story_id?: number | null
+          commit_sha?: string | null
         }
         Relationships: [
           {
@@ -217,6 +223,9 @@ export type Database = {
           total_iterations: number | null
           updated_at: string | null
           worktree_path: string | null
+          prd_mode: boolean | null
+          prd: Json | null
+          prd_progress: Json | null
         }
         Insert: {
           branch_name: string
@@ -248,6 +257,9 @@ export type Database = {
           total_iterations?: number | null
           updated_at?: string | null
           worktree_path?: string | null
+          prd_mode?: boolean | null
+          prd?: Json | null
+          prd_progress?: Json | null
         }
         Update: {
           branch_name?: string
@@ -279,6 +291,9 @@ export type Database = {
           total_iterations?: number | null
           updated_at?: string | null
           worktree_path?: string | null
+          prd_mode?: boolean | null
+          prd?: Json | null
+          prd_progress?: Json | null
         }
         Relationships: [
           {

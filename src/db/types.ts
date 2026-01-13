@@ -8,7 +8,8 @@ export type RalphCompletionReason =
   | 'promise_detected'
   | 'max_iterations'
   | 'manual_stop'
-  | 'iteration_error';
+  | 'iteration_error'
+  | 'all_stories_complete';
 
 export interface FeedbackResult {
   command: string;
@@ -16,6 +17,34 @@ export interface FeedbackResult {
   stdout: string;
   stderr: string;
   passed: boolean;
+}
+
+// PRD Mode types
+export interface PrdStory {
+  id: number;
+  title: string;
+  description?: string;
+  acceptanceCriteria?: string[];
+  passes: boolean;
+}
+
+export interface Prd {
+  title: string;
+  description?: string;
+  stories: PrdStory[];
+}
+
+export interface PrdProgress {
+  currentStoryId: number | null;
+  completedStoryIds: number[];
+  commits: PrdCommit[];
+}
+
+export interface PrdCommit {
+  storyId: number;
+  sha: string;
+  message: string;
+  timestamp: string;
 }
 
 // Table row types

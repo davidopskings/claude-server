@@ -12,16 +12,24 @@ import {
   createCodePullRequest,
   createIteration,
   updateIteration,
+  updatePrdProgress,
+  updateTodoStatusByFeatureAndOrder,
+  syncTodosFromPrd,
+  updateFeatureWorkflowStage,
   type CodeRepository
 } from './db/index.js';
-import type { FeedbackResult, RalphCompletionReason } from './db/types.js';
+
+// Workflow stage ID for "Ready for Review" (after Ralph completes)
+const WORKFLOW_STAGE_READY_FOR_REVIEW = '9bbe1c1a-cd24-44b4-98b3-2f769a4d2853';
+import type { FeedbackResult, RalphCompletionReason, Prd, PrdStory, PrdProgress, PrdCommit } from './db/types.js';
 import {
   ensureBareRepo,
   fetchOrigin,
   createWorktree,
   removeWorktree,
   commitAndPush,
-  createPullRequest
+  createPullRequest,
+  pushBranch
 } from './git.js';
 
 const execAsync = promisify(exec);
@@ -517,6 +525,8 @@ ${basePrompt}
    - What remains to be done (if anything)
 4. If the task is fully complete, output "${completionPromise}" after your summary
 5. If feedback commands failed in previous iteration, prioritize fixing those issues
+6. If you discover important patterns about this codebase (testing conventions, architecture decisions, common pitfalls, useful commands), add them to AGENTS.md in the repo root. Create it if it doesn't exist.
+7. Update the "## Codebase Patterns" section in .ralph-progress.md with any patterns you discover during this iteration - these will help future iterations work more efficiently.
 `;
 }
 
@@ -563,6 +573,12 @@ function initProgressFile(worktreePath: string, jobId: string, branchName: strin
 Job ID: ${jobId}
 Branch: ${branchName}
 Started: ${new Date().toISOString()}
+
+---
+
+## Codebase Patterns
+<!-- Add patterns you discover about this codebase here -->
+<!-- These persist across iterations and help future work -->
 
 ---
 `;
@@ -632,6 +648,560 @@ function extractSummary(output: string): string {
   // Fallback: get last meaningful chunk of output
   const lines = output.split('\n').filter(l => l.trim());
   return lines.slice(-10).join('\n').slice(0, 1000);
+}
+
+// ===== PRD Mode Runner =====
+
+const PRD_FILE = 'prd.json';
+
+export async function runRalphPrdJob(jobId: string): Promise<void> {
+  const job = await getJob(jobId);
+  if (!job) throw new Error(`Job not found: ${jobId}`);
+
+  // Get repository info
+  let repo: CodeRepository | null = null;
+  if (job.repository_id) {
+    repo = await getRepositoryById(job.repository_id);
+  } else {
+    repo = await getRepositoryByClientId(job.client_id);
+  }
+
+  if (!repo) {
+    await updateJob(jobId, {
+      status: 'failed',
+      error: 'No repository found for client. Add one to code_repositories first.',
+      completed_at: new Date().toISOString()
+    });
+    return;
+  }
+
+  // Update job with repository_id if it wasn't set
+  if (!job.repository_id) {
+    await updateJob(jobId, { repository_id: repo.id });
+  }
+
+  const maxIterations = job.max_iterations || 10;
+  // Note: feedbackCommands no longer used - Claude runs tests itself (matching original Ralph pattern)
+  const prd = job.prd as unknown as Prd;
+  let prdProgress: PrdProgress = (job.prd_progress as unknown as PrdProgress) || {
+    currentStoryId: null,
+    completedStoryIds: [],
+    commits: []
+  };
+
+  let worktreePath: string | null = null;
+
+  try {
+    // Update status to running
+    await updateJob(jobId, {
+      status: 'running',
+      started_at: new Date().toISOString(),
+      current_iteration: 0
+    });
+
+    await addJobMessage(jobId, 'system', `Starting PRD-mode Ralph job for ${repo.owner_name}/${repo.repo_name}`);
+    await addJobMessage(jobId, 'system', `PRD: "${prd.title}" with ${prd.stories.length} stories`);
+    await addJobMessage(jobId, 'system', `Max iterations: ${maxIterations}`);
+
+    // 1. Setup git
+    await addJobMessage(jobId, 'system', `Ensuring bare repository exists...`);
+    await ensureBareRepo(repo);
+
+    await addJobMessage(jobId, 'system', `Fetching latest from origin...`);
+    await fetchOrigin(repo);
+
+    await addJobMessage(jobId, 'system', `Creating worktree: ${job.branch_name}`);
+    worktreePath = await createWorktree(repo, job);
+    await updateJob(jobId, { worktree_path: worktreePath });
+
+    // 2. Initialize prd.json and progress file
+    writePrdFile(worktreePath, prd);
+    initPrdProgressFile(worktreePath, job.id, job.branch_name, prd);
+
+    // 3. Iteration loop
+    let completionReason: RalphCompletionReason | null = null;
+    let finalIteration = 0;
+
+    for (let i = 1; i <= maxIterations; i++) {
+      finalIteration = i;
+
+      // Check for manual stop request
+      const currentJob = await getJob(jobId);
+      if (currentJob?.status === 'cancelled') {
+        completionReason = 'manual_stop';
+        await addJobMessage(jobId, 'system', `Job was cancelled at iteration ${i}`);
+        break;
+      }
+
+      // Check if all stories are complete
+      const currentPrd = readPrdFile(worktreePath);
+      const incompleteStories = currentPrd.stories.filter(s => !s.passes);
+
+      if (incompleteStories.length === 0) {
+        completionReason = 'all_stories_complete';
+        await addJobMessage(jobId, 'system', `\n✓ All stories complete!`);
+        break;
+      }
+
+      await updateJob(jobId, { current_iteration: i });
+      await addJobMessage(jobId, 'system', `\n========== ITERATION ${i}/${maxIterations} ==========`);
+      await addJobMessage(jobId, 'system', `Incomplete stories: ${incompleteStories.map(s => `#${s.id}`).join(', ')}`);
+
+      // Create iteration record
+      const iteration = await createIteration(jobId, i);
+
+      // Build PRD iteration prompt
+      const iterationPrompt = buildPrdIterationPrompt(
+        job.prompt,
+        currentPrd,
+        i,
+        maxIterations,
+        job.branch_name
+      );
+
+      // Run Claude for this iteration (with retry on crash)
+      // Use <promise>COMPLETE</promise> as signal that ALL stories are done (matches original Ralph)
+      let result = await runClaudeIteration(iterationPrompt, worktreePath, jobId, iteration.id, '<promise>COMPLETE</promise>');
+
+      // Retry once on crash
+      if (result.exitCode !== 0 && !result.promiseDetected) {
+        await addJobMessage(jobId, 'system', `Iteration crashed (exit code ${result.exitCode}), retrying...`);
+        result = await runClaudeIteration(iterationPrompt, worktreePath, jobId, iteration.id, '<promise>COMPLETE</promise>');
+      }
+
+      // Check for iteration failure (after retry)
+      if (result.exitCode !== 0) {
+        completionReason = 'iteration_error';
+        await addJobMessage(jobId, 'system', `Iteration ${i} failed after retry with exit code ${result.exitCode}`);
+
+        await updateIteration(iteration.id, {
+          completed_at: new Date().toISOString(),
+          exit_code: result.exitCode,
+          error: result.error,
+          prompt_used: iterationPrompt,
+          promise_detected: false,
+          output_summary: result.summary
+        });
+        break;
+      }
+
+      // Check if Claude signaled ALL stories complete
+      if (result.promiseDetected) {
+        completionReason = 'promise_detected';
+        await addJobMessage(jobId, 'system', `Claude signaled ALL stories complete with <promise>COMPLETE</promise>`);
+
+        // Update iteration record with completion
+        await updateIteration(iteration.id, {
+          completed_at: new Date().toISOString(),
+          exit_code: result.exitCode,
+          prompt_used: iterationPrompt,
+          promise_detected: true,
+          output_summary: result.summary
+        });
+        break;
+      }
+
+      // Check prd.json for newly completed stories (Claude manages this, we just track)
+      const updatedPrd = readPrdFile(worktreePath);
+      const newlyCompleted = findNewlyCompletedStories(prdProgress.completedStoryIds, updatedPrd.stories);
+
+      // Process ALL newly completed stories
+      if (newlyCompleted.length > 0) {
+        await addJobMessage(jobId, 'system', `Completed ${newlyCompleted.length} stories this iteration`);
+
+        for (const story of newlyCompleted) {
+          // Try to find the commit Claude made for this story
+          let commitSha: string | null = null;
+          try {
+            const { stdout } = await execAsync(
+              `git log --oneline -1 --grep="story-${story.id}" --format="%H"`,
+              { cwd: worktreePath }
+            );
+            commitSha = stdout.trim() || null;
+          } catch {
+            // No commit found for this story
+          }
+
+          // If no story-specific commit found, check for any new commit since last known
+          if (!commitSha) {
+            try {
+              const lastKnownCommit = prdProgress.commits[prdProgress.commits.length - 1]?.sha;
+              const { stdout } = await execAsync(
+                lastKnownCommit
+                  ? `git log --oneline -1 ${lastKnownCommit}..HEAD --format="%H"`
+                  : `git log --oneline -1 --format="%H"`,
+                { cwd: worktreePath }
+              );
+              commitSha = stdout.trim() || null;
+            } catch {
+              // No commit found
+            }
+          }
+
+          if (commitSha) {
+            const prdCommit: PrdCommit = {
+              storyId: story.id,
+              sha: commitSha,
+              message: `feat(story-${story.id}): ${story.title}`,
+              timestamp: new Date().toISOString()
+            };
+
+            prdProgress.commits.push(prdCommit);
+            prdProgress.completedStoryIds.push(story.id);
+
+            await addJobMessage(jobId, 'system', `✓ Story #${story.id} committed: ${commitSha.substring(0, 7)}`);
+          } else {
+            // Story marked complete but no commit found - still track it
+            prdProgress.completedStoryIds.push(story.id);
+            await addJobMessage(jobId, 'system', `✓ Story #${story.id} marked complete (no commit found)`);
+          }
+
+          // Update todo status in database (story.id is 1-indexed, order_index is 0-indexed)
+          if (job.feature_id) {
+            try {
+              const orderIndex = story.id - 1; // Convert 1-indexed story ID to 0-indexed order_index
+              await updateTodoStatusByFeatureAndOrder(job.feature_id, orderIndex, 'done');
+              await addJobMessage(jobId, 'system', `Updated todo (order_index=${orderIndex}) status to done`);
+            } catch (err) {
+              await addJobMessage(jobId, 'system', `Warning: Failed to update todo status: ${err}`);
+            }
+          }
+        }
+
+        // Update iteration with first story info (for backwards compatibility)
+        const firstStory = newlyCompleted[0];
+        const firstCommit = prdProgress.commits.find(c => c.storyId === firstStory.id);
+        if (firstCommit) {
+          await updateIteration(iteration.id, {
+            story_id: firstStory.id,
+            commit_sha: firstCommit.sha
+          });
+        }
+      }
+
+      // Update current story being worked on (first incomplete)
+      const nextIncomplete = updatedPrd.stories.find(s => !s.passes);
+      prdProgress.currentStoryId = nextIncomplete?.id || null;
+
+      // Save progress to database
+      await updatePrdProgress(jobId, prdProgress);
+
+      // Update iteration record
+      await updateIteration(iteration.id, {
+        completed_at: new Date().toISOString(),
+        exit_code: result.exitCode,
+        prompt_used: iterationPrompt,
+        promise_detected: newlyCompleted.length > 0,
+        output_summary: result.summary
+      });
+
+      // Append to progress file (no feedback results - Claude runs tests itself)
+      appendPrdIterationToProgress(worktreePath, i, result.summary, newlyCompleted, []);
+
+      await addJobMessage(jobId, 'system', `Iteration ${i} complete. Completed stories: ${prdProgress.completedStoryIds.length}/${prd.stories.length}`);
+    }
+
+    // Reached max iterations without completing all stories
+    if (!completionReason) {
+      completionReason = 'max_iterations';
+      await addJobMessage(jobId, 'system', `\nReached maximum iterations (${maxIterations}) without completing all stories.`);
+    }
+
+    // 4. Post-loop: Sync final state from prd.json to database
+    await addJobMessage(jobId, 'system', `\n========== SYNCING FINAL STATE ==========`);
+
+    // Read final prd.json state from worktree
+    const finalPrd = readPrdFile(worktreePath);
+    const finalCompletedStories = finalPrd.stories.filter(s => s.passes);
+    prdProgress.completedStoryIds = finalCompletedStories.map(s => s.id);
+
+    // Sync todo statuses from prd.json (if feature_id exists)
+    if (job.feature_id) {
+      try {
+        const syncResult = await syncTodosFromPrd(job.feature_id, finalPrd.stories);
+        await addJobMessage(jobId, 'system', `Synced ${syncResult.updated} todos from prd.json`);
+      } catch (err) {
+        await addJobMessage(jobId, 'system', `Warning: Failed to sync todos: ${err}`);
+      }
+    }
+
+    // 5. Post-loop: Push all commits and create PR
+    await addJobMessage(jobId, 'system', `\n========== CREATING PR ==========`);
+
+    // Push the branch with all commits
+    if (prdProgress.commits.length > 0) {
+      pushBranch(worktreePath, job.branch_name);
+
+      const branchRecord = await createCodeBranch({
+        repositoryId: repo.id,
+        featureId: job.feature_id || undefined,
+        name: job.branch_name,
+        url: `https://github.com/${repo.owner_name}/${repo.repo_name}/tree/${job.branch_name}`
+      });
+
+      const pr = await createPullRequest(repo, job, worktreePath);
+
+      const prRecord = await createCodePullRequest({
+        repositoryId: repo.id,
+        featureId: job.feature_id || undefined,
+        branchId: branchRecord.id,
+        number: pr.number,
+        title: pr.title,
+        status: 'open',
+        url: pr.url
+      });
+
+      await updateJob(jobId, {
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        exit_code: 0,
+        pr_url: pr.url,
+        pr_number: pr.number,
+        files_changed: pr.filesChanged,
+        code_branch_id: branchRecord.id,
+        code_pull_request_id: prRecord.id,
+        total_iterations: finalIteration,
+        completion_reason: completionReason,
+        prd_progress: JSON.parse(JSON.stringify(prdProgress))
+      });
+
+      await addJobMessage(jobId, 'system', `\nPRD job completed after ${finalIteration} iterations!`);
+      await addJobMessage(jobId, 'system', `Completion reason: ${completionReason}`);
+      await addJobMessage(jobId, 'system', `Stories completed: ${prdProgress.completedStoryIds.length}/${prd.stories.length}`);
+      await addJobMessage(jobId, 'system', `Commits: ${prdProgress.commits.length}`);
+      await addJobMessage(jobId, 'system', `PR: ${pr.url}`);
+
+      // Update feature workflow stage to "Ready for Review"
+      if (job.feature_id) {
+        try {
+          await updateFeatureWorkflowStage(job.feature_id, WORKFLOW_STAGE_READY_FOR_REVIEW);
+          await addJobMessage(jobId, 'system', `Updated feature workflow stage to "Ready for Review"`);
+        } catch (err) {
+          await addJobMessage(jobId, 'system', `Warning: Failed to update feature workflow stage: ${err}`);
+        }
+      }
+    } else {
+      await updateJob(jobId, {
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        exit_code: 0,
+        error: 'No stories were completed',
+        total_iterations: finalIteration,
+        completion_reason: completionReason,
+        prd_progress: JSON.parse(JSON.stringify(prdProgress))
+      });
+
+      await addJobMessage(jobId, 'system', `\nPRD job completed after ${finalIteration} iterations but no stories were completed.`);
+    }
+
+  } catch (err: any) {
+    console.error(`PRD job ${jobId} failed:`, err);
+
+    await updateJob(jobId, {
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error: err.message || String(err),
+      completion_reason: 'iteration_error',
+      prd_progress: JSON.parse(JSON.stringify(prdProgress))
+    });
+
+    await addJobMessage(jobId, 'system', `PRD job failed: ${err.message}`);
+
+  } finally {
+    // Cleanup worktree
+    if (worktreePath && repo) {
+      try {
+        await removeWorktree(repo, worktreePath);
+      } catch (cleanupErr) {
+        console.error(`Failed to cleanup worktree:`, cleanupErr);
+      }
+    }
+  }
+}
+
+// PRD file helpers
+function writePrdFile(worktreePath: string, prd: Prd): void {
+  const prdPath = join(worktreePath, PRD_FILE);
+  writeFileSync(prdPath, JSON.stringify(prd, null, 2));
+}
+
+function readPrdFile(worktreePath: string): Prd {
+  const prdPath = join(worktreePath, PRD_FILE);
+  if (existsSync(prdPath)) {
+    return JSON.parse(readFileSync(prdPath, 'utf8'));
+  }
+  throw new Error('prd.json not found in worktree');
+}
+
+function findNewlyCompletedStories(
+  previouslyCompleted: number[],
+  currentStories: PrdStory[]
+): PrdStory[] {
+  return currentStories.filter(
+    story => story.passes && !previouslyCompleted.includes(story.id)
+  );
+}
+
+function initPrdProgressFile(
+  worktreePath: string,
+  jobId: string,
+  branchName: string,
+  prd: Prd
+): void {
+  const progressPath = join(worktreePath, PROGRESS_FILE);
+
+  const storiesList = prd.stories.map(s =>
+    `- [ ] Story #${s.id}: ${s.title}`
+  ).join('\n');
+
+  const content = `# PRD Progress Log
+Job ID: ${jobId}
+Branch: ${branchName}
+Started: ${new Date().toISOString()}
+
+## PRD: ${prd.title}
+${prd.description || ''}
+
+## Stories
+${storiesList}
+
+---
+
+## Codebase Patterns
+<!-- Add patterns you discover about this codebase here -->
+<!-- These persist across iterations and help future work -->
+
+---
+`;
+  writeFileSync(progressPath, content);
+}
+
+function buildPrdIterationPrompt(
+  basePrompt: string,
+  prd: Prd,
+  iteration: number,
+  maxIterations: number,
+  branchName: string
+): string {
+  // Simplified prompt matching original Ralph pattern
+  // Claude reads prd.json and progress.txt itself, runs tests itself
+  return `# Ralph Agent Instructions
+
+You are an autonomous coding agent working on a software project.
+
+## Context
+- Iteration: ${iteration} of ${maxIterations}
+- PRD: "${prd.title}"
+- Branch: ${branchName}
+
+## Your Task
+${basePrompt}
+
+## Workflow
+1. Read the PRD at \`prd.json\` in the repo root
+2. Read the progress log at \`progress.txt\` (check Codebase Patterns section first)
+3. Check you're on the correct branch (${branchName}). If not, check it out.
+4. **Install dependencies if needed** (check for node_modules, vendor, etc. - run npm/bun/pip install if missing)
+5. Pick the **highest priority** user story where \`passes: false\`
+6. Implement that single user story
+7. Run quality checks (typecheck, lint, test - use whatever your project requires)
+8. Update AGENTS.md files if you discover reusable patterns
+9. If checks pass, commit ALL changes with message: \`feat: [Story ID] - [Story Title]\`
+10. Update prd.json to set \`passes: true\` for the completed story
+11. Append your progress to \`progress.txt\`
+
+## Progress Report Format
+APPEND to progress.txt (never replace, always append):
+\`\`\`
+## [Date/Time] - Story #X
+- What was implemented
+- Files changed
+- **Learnings for future iterations:**
+  - Patterns discovered
+  - Gotchas encountered
+---
+\`\`\`
+
+The learnings section is critical - it helps future iterations avoid repeating mistakes.
+
+## Consolidate Patterns
+If you discover a **reusable pattern**, add it to the \`## Codebase Patterns\` section at the TOP of progress.txt:
+\`\`\`
+## Codebase Patterns
+- Example: Use \`sql<number>\` template for aggregations
+- Example: Always use \`IF NOT EXISTS\` for migrations
+\`\`\`
+
+## Update AGENTS.md Files
+Before committing, check if edited directories have learnings worth preserving in nearby AGENTS.md files.
+Only add genuinely reusable knowledge that would help future work in that directory.
+
+## Quality Requirements
+- ALL commits must pass your project's quality checks (typecheck, lint, test)
+- Do NOT commit broken code
+- Keep changes focused and minimal
+- Follow existing code patterns
+
+## If Quality Checks Fail
+If typecheck, lint, or tests fail:
+1. **Fix the issues** - don't just skip them
+2. Re-run the checks until they pass
+3. Only then commit and update prd.json
+4. If you cannot fix the issue after multiple attempts, document it in progress.txt and move on (do NOT mark the story as passing)
+
+## Stop Condition
+After completing a user story, check if ALL stories have \`passes: true\`.
+
+If ALL stories are complete and passing, reply with:
+<promise>COMPLETE</promise>
+
+If there are still stories with \`passes: false\`, end your response normally (another iteration will pick up the next story).
+
+## Important
+- Work on ONE story per iteration
+- Commit frequently
+- Keep CI green
+- Read the Codebase Patterns section in progress.txt before starting
+`;
+}
+
+function appendPrdIterationToProgress(
+  worktreePath: string,
+  iteration: number,
+  summary: string,
+  completedStories: PrdStory[],
+  feedbackResults: FeedbackResult[]
+): void {
+  const progressPath = join(worktreePath, PROGRESS_FILE);
+
+  const completedList = completedStories.length > 0
+    ? `\n### Completed Stories\n${completedStories.map(s => `- Story #${s.id}: ${s.title}`).join('\n')}`
+    : '';
+
+  const feedbackLines = feedbackResults.length > 0
+    ? `\n### Feedback Results\n${feedbackResults.map(r => {
+        const status = r.passed ? '✓ PASSED' : '✗ FAILED';
+        let line = `- \`${r.command}\`: ${status}`;
+        if (!r.passed && r.stderr) {
+          const errorPreview = r.stderr.split('\n').slice(0, 3).join('\n  ');
+          line += `\n  Error: ${errorPreview}`;
+        }
+        return line;
+      }).join('\n')}`
+    : '';
+
+  const content = `
+## Iteration ${iteration}
+Completed: ${new Date().toISOString()}
+${completedList}
+
+### Summary
+${summary || 'No summary provided.'}
+${feedbackLines}
+
+---
+`;
+  appendFileSync(progressPath, content);
 }
 
 // ===== Standard Job Runner =====
