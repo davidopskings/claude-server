@@ -254,15 +254,15 @@ export async function createPullRequest(
 
   // Check if PR already exists for this branch
   try {
-    const existingPr = execSync(
-      `gh pr view ${job.branch_name} --json url,number --jq '"\(.url) \(.number)"'`,
+    const existingPrJson = execSync(
+      `gh pr view ${job.branch_name} --json url,number`,
       { cwd: worktreePath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
     ).trim();
 
-    if (existingPr) {
-      const [url, num] = existingPr.split(' ');
-      prUrl = url;
-      prNumber = parseInt(num) || 0;
+    if (existingPrJson) {
+      const existingPr = JSON.parse(existingPrJson);
+      prUrl = existingPr.url;
+      prNumber = existingPr.number;
       console.log(`PR already exists for branch ${job.branch_name}: ${prUrl}`);
     } else {
       throw new Error('No existing PR found');
