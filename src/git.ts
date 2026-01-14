@@ -160,11 +160,22 @@ export async function createWorktree(
       { cwd: barePath, stdio: 'pipe' }
     );
   } else {
-    // Branch doesn't exist - fetch latest default branch from origin, then create new branch
-    // Use FETCH_HEAD to guarantee we're using the just-fetched commit, not a stale local ref
-    execSync(`git fetch origin ${defaultBranch}`, { cwd: barePath, stdio: 'pipe' });
+    // Branch doesn't exist - get latest commit SHA from origin's default branch, then create new branch
+    // Use ls-remote to get the exact SHA (atomic, no race conditions with FETCH_HEAD)
+    const remoteSha = execSync(`git ls-remote origin ${defaultBranch}`, { cwd: barePath, encoding: 'utf-8' })
+      .split('\t')[0]
+      .trim();
+
+    if (!remoteSha) {
+      throw new Error(`Could not find ${defaultBranch} on origin`);
+    }
+
+    // Fetch that specific commit to ensure we have it locally
+    execSync(`git fetch origin ${remoteSha}`, { cwd: barePath, stdio: 'pipe' });
+
+    // Create worktree from the exact SHA
     execSync(
-      `git worktree add -b ${job.branch_name} "${worktreePath}" FETCH_HEAD`,
+      `git worktree add -b ${job.branch_name} "${worktreePath}" ${remoteSha}`,
       { cwd: barePath, stdio: 'pipe' }
     );
   }
