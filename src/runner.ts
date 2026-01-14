@@ -16,6 +16,8 @@ import {
   updateTodoStatusByFeatureAndOrder,
   syncTodosFromPrd,
   updateFeatureWorkflowStage,
+  createComment,
+  getClientToolByType,
   type CodeRepository
 } from './db/index.js';
 
@@ -986,6 +988,37 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
           await addJobMessage(jobId, 'system', `Warning: Failed to update feature workflow stage: ${err}`);
         }
       }
+
+      // Trigger Vercel preview deployment and add feature comment
+      if (job.feature_id && repo.client_id) {
+        try {
+          const vercelTool = await getClientToolByType(repo.client_id, 'vercel');
+          if (vercelTool?.metadata?.githubRepoId) {
+            const deployment = await triggerVercelDeployment(
+              vercelTool.metadata.githubRepoId,
+              job.branch_name,
+              repo.client_id
+            );
+
+            if (deployment) {
+              await addJobMessage(jobId, 'system', `Triggered Vercel preview: ${deployment.url}`);
+
+              // Add comment to feature with deployment link
+              const commentBody = `<p class="text-node">Preview deployment created: <a href="${deployment.url}" target="_blank">${deployment.url}</a></p><p class="text-node"><a href="${deployment.inspectorUrl}" target="_blank">View build status</a></p>`;
+              await createComment({
+                parentType: 'feature',
+                parentId: job.feature_id,
+                body: commentBody
+              });
+
+              await addJobMessage(jobId, 'system', `Added deployment comment to feature`);
+            }
+          }
+        } catch (err: any) {
+          await addJobMessage(jobId, 'system', `Vercel deployment failed: ${err.message}`);
+          // Don't fail the job - deployment is optional
+        }
+      }
     } else {
       await updateJob(jobId, {
         status: 'completed',
@@ -1016,6 +1049,46 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
   } finally {
     // Keep worktree for debugging - will be cleaned up on next job for same branch
   }
+}
+
+// Vercel deployment helper
+async function triggerVercelDeployment(
+  githubRepoId: string,
+  branchName: string,
+  clientId: string
+): Promise<{ url: string; inspectorUrl: string } | null> {
+  const vercelTool = await getClientToolByType(clientId, 'vercel');
+  if (!vercelTool?.metadata?.token) {
+    return null; // Vercel not configured for this client
+  }
+
+  const response = await fetch('https://api.vercel.com/v13/deployments', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${vercelTool.metadata.token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: vercelTool.metadata.projectName || vercelTool.external_id,
+      gitSource: {
+        type: 'github',
+        repoId: githubRepoId,
+        ref: branchName
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Vercel deployment failed:', errorText);
+    throw new Error(`Vercel API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  return {
+    url: `https://${data.url}`,
+    inspectorUrl: data.inspectorUrl
+  };
 }
 
 // PRD file helpers

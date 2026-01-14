@@ -646,3 +646,43 @@ export async function updateFeatureWorkflowStage(
 
   if (error) throw error;
 }
+
+// ----- Comments -----
+
+export async function createComment(data: {
+  parentType: string;
+  parentId: string;
+  body: string;
+  createdByTeamId?: string;
+}): Promise<{ id: string }> {
+  const { data: comment, error } = await supabase
+    .from('comments')
+    .insert({
+      parent_type: data.parentType,
+      parent_id: data.parentId,
+      body: data.body,
+      created_by_team_id: data.createdByTeamId || '0403861c-c451-4235-848d-7dbaa0b0e963'
+    })
+    .select('id')
+    .single();
+
+  if (error) throw error;
+  return comment;
+}
+
+// ----- Client Tools -----
+
+export async function getClientToolByType(
+  clientId: string,
+  toolType: string
+): Promise<{ external_id: string | null; metadata: any } | null> {
+  const { data, error } = await supabase
+    .from('client_tools')
+    .select('external_id, metadata')
+    .eq('client_id', clientId)
+    .eq('tool_type', toolType)
+    .single();
+
+  if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows
+  return data;
+}
