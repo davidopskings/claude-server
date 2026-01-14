@@ -46,8 +46,9 @@ export async function fetchOrigin(repo: CodeRepository): Promise<void> {
   }
 
   console.log(`Fetching origin for ${repo.repo_name}...`);
-  // In bare repos, we need to explicitly update local branches from remote
-  execSync('git fetch origin "+refs/heads/*:refs/heads/*" --prune', { cwd: barePath, stdio: 'pipe' });
+  // Fetch remote refs without updating local branches that may be checked out in worktrees
+  // Use refspec that only updates refs not checked out
+  execSync('git fetch origin --prune', { cwd: barePath, stdio: 'pipe' });
 }
 
 export async function fetchAllRepos(): Promise<{ repo: string; success: boolean; error?: string }[]> {
@@ -67,7 +68,7 @@ export async function fetchAllRepos(): Promise<{ repo: string; success: boolean;
     const repoName = barePath.split('/').pop()?.replace('.git', '') || '';
 
     try {
-      execSync('git fetch origin "+refs/heads/*:refs/heads/*" --prune', { cwd: barePath, stdio: 'pipe' });
+      execSync('git fetch origin --prune', { cwd: barePath, stdio: 'pipe' });
       results.push({ repo: repoName, success: true });
     } catch (err: any) {
       results.push({ repo: repoName, success: false, error: err.message });
