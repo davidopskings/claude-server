@@ -883,6 +883,16 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
       // Append to progress file (no feedback results - Claude runs tests itself)
       appendPrdIterationToProgress(worktreePath, i, result.summary, newlyCompleted, []);
 
+      // Push after each iteration to save progress (prevents losing work if job crashes later)
+      if (newlyCompleted.length > 0) {
+        try {
+          pushBranch(worktreePath, job.branch_name);
+          await addJobMessage(jobId, 'system', `Pushed commits to origin/${job.branch_name}`);
+        } catch (err) {
+          await addJobMessage(jobId, 'system', `Warning: Failed to push: ${err}`);
+        }
+      }
+
       await addJobMessage(jobId, 'system', `Iteration ${i} complete. Completed stories: ${prdProgress.completedStoryIds.length}/${prd.stories.length}`);
 
       // Check if Claude signaled ALL stories complete - break AFTER tracking commits
@@ -917,13 +927,10 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
       }
     }
 
-    // 5. Post-loop: Push all commits and create PR
+    // 5. Post-loop: Create PR (commits already pushed after each iteration)
     await addJobMessage(jobId, 'system', `\n========== CREATING PR ==========`);
 
-    // Push the branch with all commits
     if (prdProgress.commits.length > 0) {
-      pushBranch(worktreePath, job.branch_name);
-
       const branchRecord = await createCodeBranch({
         repositoryId: repo.id,
         featureId: job.feature_id || undefined,
