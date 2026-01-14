@@ -702,27 +702,21 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
     await updateJob(jobId, { worktree_path: worktreePath });
 
     // 2. Check if prd.json already exists (from previous job on this branch)
-    const prdPath = join(worktreePath, PRD_FILE);
-    if (existsSync(prdPath)) {
-      const existingPrd = readPrdFile(worktreePath);
+    const existingPrd = readPrdFile(worktreePath);
 
-      // Compare with the PRD from the database to ensure it's the same feature
-      if (existingPrd.title === prd.title) {
-        // Same PRD - sync progress from existing prd.json
-        const completedStories = existingPrd.stories.filter(s => s.passes);
-        prdProgress.completedStoryIds = completedStories.map(s => s.id);
-        prdProgress.currentStoryId = existingPrd.stories.find(s => !s.passes)?.id || null;
+    if (existingPrd && existingPrd.title === prd.title) {
+      // Same PRD - sync progress from existing prd.json
+      const completedStories = existingPrd.stories.filter(s => s.passes);
+      prdProgress.completedStoryIds = completedStories.map(s => s.id);
+      prdProgress.currentStoryId = existingPrd.stories.find(s => !s.passes)?.id || null;
 
-        await addJobMessage(jobId, 'system', `Found existing prd.json with ${completedStories.length}/${existingPrd.stories.length} stories complete`);
-        await updatePrdProgress(jobId, prdProgress);
-      } else {
-        // Different PRD (stale file from another feature) - overwrite with correct PRD
-        await addJobMessage(jobId, 'system', `Found stale prd.json ("${existingPrd.title}"), replacing with current PRD`);
-        writePrdFile(worktreePath, prd);
-        initPrdProgressFile(worktreePath, job.id, job.branch_name, prd);
-      }
+      await addJobMessage(jobId, 'system', `Found existing prd.json with ${completedStories.length}/${existingPrd.stories.length} stories complete`);
+      await updatePrdProgress(jobId, prdProgress);
     } else {
-      // Fresh start - initialize prd.json and progress file
+      // Fresh start or stale PRD - initialize prd.json and progress file
+      if (existingPrd) {
+        await addJobMessage(jobId, 'system', `Found stale prd.json ("${existingPrd.title}"), replacing with current PRD`);
+      }
       writePrdFile(worktreePath, prd);
       initPrdProgressFile(worktreePath, job.id, job.branch_name, prd);
     }
@@ -744,6 +738,9 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 
       // Check if all stories are complete
       const currentPrd = readPrdFile(worktreePath);
+      if (!currentPrd) {
+        throw new Error('prd.json is missing or corrupted during iteration');
+      }
       const incompleteStories = currentPrd.stories.filter(s => !s.passes);
 
       if (incompleteStories.length === 0) {
@@ -797,6 +794,9 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
       // Check prd.json for newly completed stories (Claude manages this, we just track)
       // IMPORTANT: Do this BEFORE checking promiseDetected so we track commits even if Claude completes all stories
       const updatedPrd = readPrdFile(worktreePath);
+      if (!updatedPrd) {
+        throw new Error('prd.json is missing or corrupted after iteration');
+      }
       const newlyCompleted = findNewlyCompletedStories(prdProgress.completedStoryIds, updatedPrd.stories);
 
       // Process ALL newly completed stories
@@ -923,11 +923,13 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 
     // Read final prd.json state from worktree
     const finalPrd = readPrdFile(worktreePath);
-    const finalCompletedStories = finalPrd.stories.filter(s => s.passes);
-    prdProgress.completedStoryIds = finalCompletedStories.map(s => s.id);
+    if (finalPrd) {
+      const finalCompletedStories = finalPrd.stories.filter(s => s.passes);
+      prdProgress.completedStoryIds = finalCompletedStories.map(s => s.id);
+    }
 
     // Sync todo statuses from prd.json (if feature_id exists)
-    if (job.feature_id) {
+    if (job.feature_id && finalPrd) {
       try {
         const syncResult = await syncTodosFromPrd(job.feature_id, finalPrd.stories);
         await addJobMessage(jobId, 'system', `Synced ${syncResult.updated} todos from prd.json`);
@@ -1097,12 +1099,20 @@ function writePrdFile(worktreePath: string, prd: Prd): void {
   writeFileSync(prdPath, JSON.stringify(prd, null, 2));
 }
 
-function readPrdFile(worktreePath: string): Prd {
+function readPrdFile(worktreePath: string): Prd | null {
   const prdPath = join(worktreePath, PRD_FILE);
-  if (existsSync(prdPath)) {
-    return JSON.parse(readFileSync(prdPath, 'utf8'));
+  if (!existsSync(prdPath)) {
+    return null;
   }
-  throw new Error('prd.json not found in worktree');
+  try {
+    const content = readFileSync(prdPath, 'utf8');
+    if (!content.trim()) {
+      return null; // Empty file
+    }
+    return JSON.parse(content);
+  } catch {
+    return null; // Corrupted JSON
+  }
 }
 
 function findNewlyCompletedStories(
