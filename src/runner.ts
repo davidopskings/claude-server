@@ -699,9 +699,31 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
     worktreePath = await createWorktree(repo, job);
     await updateJob(jobId, { worktree_path: worktreePath });
 
-    // 2. Initialize prd.json and progress file
-    writePrdFile(worktreePath, prd);
-    initPrdProgressFile(worktreePath, job.id, job.branch_name, prd);
+    // 2. Check if prd.json already exists (from previous job on this branch)
+    const prdPath = join(worktreePath, PRD_FILE);
+    if (existsSync(prdPath)) {
+      const existingPrd = readPrdFile(worktreePath);
+
+      // Compare with the PRD from the database to ensure it's the same feature
+      if (existingPrd.title === prd.title) {
+        // Same PRD - sync progress from existing prd.json
+        const completedStories = existingPrd.stories.filter(s => s.passes);
+        prdProgress.completedStoryIds = completedStories.map(s => s.id);
+        prdProgress.currentStoryId = existingPrd.stories.find(s => !s.passes)?.id || null;
+
+        await addJobMessage(jobId, 'system', `Found existing prd.json with ${completedStories.length}/${existingPrd.stories.length} stories complete`);
+        await updatePrdProgress(jobId, prdProgress);
+      } else {
+        // Different PRD (stale file from another feature) - overwrite with correct PRD
+        await addJobMessage(jobId, 'system', `Found stale prd.json ("${existingPrd.title}"), replacing with current PRD`);
+        writePrdFile(worktreePath, prd);
+        initPrdProgressFile(worktreePath, job.id, job.branch_name, prd);
+      }
+    } else {
+      // Fresh start - initialize prd.json and progress file
+      writePrdFile(worktreePath, prd);
+      initPrdProgressFile(worktreePath, job.id, job.branch_name, prd);
+    }
 
     // 3. Iteration loop
     let completionReason: RalphCompletionReason | null = null;
