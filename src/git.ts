@@ -160,7 +160,12 @@ export async function createWorktree(
       { cwd: barePath, stdio: 'pipe' }
     );
   } else {
-    // Branch doesn't exist, create from default branch
+    // Branch doesn't exist - fetch latest default branch from origin first, then create
+    try {
+      execSync(`git fetch origin ${defaultBranch}:${defaultBranch}`, { cwd: barePath, stdio: 'pipe' });
+    } catch {
+      // Ignore if default branch is checked out in a worktree - we'll use whatever ref exists
+    }
     execSync(
       `git worktree add -b ${job.branch_name} "${worktreePath}" ${defaultBranch}`,
       { cwd: barePath, stdio: 'pipe' }
