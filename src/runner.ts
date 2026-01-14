@@ -26,7 +26,6 @@ import {
   ensureBareRepo,
   fetchOrigin,
   createWorktree,
-  removeWorktree,
   commitAndPush,
   createPullRequest,
   pushBranch
@@ -187,14 +186,7 @@ export async function runJob(jobId: string): Promise<void> {
     await addJobMessage(jobId, 'system', `Job failed: ${err.message}`);
 
   } finally {
-    // Cleanup worktree
-    if (worktreePath && repo) {
-      try {
-        await removeWorktree(repo, worktreePath);
-      } catch (cleanupErr) {
-        console.error(`Failed to cleanup worktree:`, cleanupErr);
-      }
-    }
+    // Keep worktree for debugging - will be cleaned up on next job for same branch
   }
 }
 
@@ -410,14 +402,7 @@ export async function runRalphJob(jobId: string): Promise<void> {
     await addJobMessage(jobId, 'system', `Ralph job failed: ${err.message}`);
 
   } finally {
-    // Cleanup worktree
-    if (worktreePath && repo) {
-      try {
-        await removeWorktree(repo, worktreePath);
-      } catch (cleanupErr) {
-        console.error(`Failed to cleanup worktree:`, cleanupErr);
-      }
-    }
+    // Keep worktree for debugging - will be cleaned up on next job for same branch
   }
 }
 
@@ -1007,14 +992,7 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
     await addJobMessage(jobId, 'system', `PRD job failed: ${err.message}`);
 
   } finally {
-    // Cleanup worktree
-    if (worktreePath && repo) {
-      try {
-        await removeWorktree(repo, worktreePath);
-      } catch (cleanupErr) {
-        console.error(`Failed to cleanup worktree:`, cleanupErr);
-      }
-    }
+    // Keep worktree for debugging - will be cleaned up on next job for same branch
   }
 }
 
