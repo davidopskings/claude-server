@@ -1,33 +1,40 @@
-import { spawn } from 'child_process';
-import { getFeature, updateFeaturePrd, createTodos, deleteTodosByFeatureId, type FeatureWithClient, type TodoInsert } from './db/index.js';
+import { spawn } from "node:child_process";
+import {
+	createTodos,
+	deleteTodosByFeatureId,
+	type FeatureWithClient,
+	getFeature,
+	type TodoInsert,
+	updateFeaturePrd,
+} from "./db/index.js";
 
-const HOME_DIR = process.env.HOME || '/Users/davidcavarlacic';
+const HOME_DIR = process.env.HOME || "/Users/davidcavarlacic";
 const CLAUDE_BIN = process.env.CLAUDE_BIN || `${HOME_DIR}/.local/bin/claude`;
 
 // PRD structure based on ai-dev-tasks pattern
 export interface GeneratedPrd {
-  title: string;
-  overview: string;
-  goals: string[];
-  userStories: string[];
-  functionalRequirements: string[];
-  nonGoals: string[];
-  technicalConsiderations: string[];
-  successMetrics: string[];
+	title: string;
+	overview: string;
+	goals: string[];
+	userStories: string[];
+	functionalRequirements: string[];
+	nonGoals: string[];
+	technicalConsiderations: string[];
+	successMetrics: string[];
 }
 
 export interface GeneratedTask {
-  title: string;
-  description: string;
-  orderIndex: number;
+	title: string;
+	description: string;
+	orderIndex: number;
 }
 
 export interface PrdGenerationResult {
-  featureId: string;
-  featureTitle: string;
-  prd: GeneratedPrd;
-  tasks: GeneratedTask[];
-  todosCreated: number;
+	featureId: string;
+	featureTitle: string;
+	prd: GeneratedPrd;
+	tasks: GeneratedTask[];
+	todosCreated: number;
 }
 
 // Prompt for generating PRD - based on ai-dev-tasks create-prd.md
@@ -91,165 +98,174 @@ PRD:
 `;
 
 async function runClaudeForPrd(prompt: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let output = '';
-    let errorOutput = '';
+	return new Promise((resolve, reject) => {
+		let output = "";
+		let errorOutput = "";
 
-    const proc = spawn(CLAUDE_BIN, [
-      '--print',
-      '--dangerously-skip-permissions',
-      '--output-format', 'text',
-      prompt
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, HOME: HOME_DIR },
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
+		const proc = spawn(
+			CLAUDE_BIN,
+			[
+				"--print",
+				"--dangerously-skip-permissions",
+				"--output-format",
+				"text",
+				prompt,
+			],
+			{
+				cwd: process.cwd(),
+				env: { ...process.env, HOME: HOME_DIR },
+				stdio: ["ignore", "pipe", "pipe"],
+			},
+		);
 
-    proc.stdout.on('data', (data: Buffer) => {
-      output += data.toString();
-    });
+		proc.stdout.on("data", (data: Buffer) => {
+			output += data.toString();
+		});
 
-    proc.stderr.on('data', (data: Buffer) => {
-      errorOutput += data.toString();
-    });
+		proc.stderr.on("data", (data: Buffer) => {
+			errorOutput += data.toString();
+		});
 
-    proc.on('close', (code: number | null) => {
-      if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
-      } else {
-        resolve(output.trim());
-      }
-    });
+		proc.on("close", (code: number | null) => {
+			if (code !== 0) {
+				reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
+			} else {
+				resolve(output.trim());
+			}
+		});
 
-    proc.on('error', (err: Error) => {
-      reject(err);
-    });
-  });
+		proc.on("error", (err: Error) => {
+			reject(err);
+		});
+	});
 }
 
 function extractJson(text: string): string {
-  // Try to extract JSON from the response, handling markdown code blocks
-  let jsonStr = text.trim();
+	// Try to extract JSON from the response, handling markdown code blocks
+	let jsonStr = text.trim();
 
-  // First, try to find JSON within markdown code blocks anywhere in the text
-  const jsonBlockMatch = jsonStr.match(/```json\s*([\s\S]*?)```/);
-  if (jsonBlockMatch) {
-    return jsonBlockMatch[1].trim();
-  }
+	// First, try to find JSON within markdown code blocks anywhere in the text
+	const jsonBlockMatch = jsonStr.match(/```json\s*([\s\S]*?)```/);
+	if (jsonBlockMatch) {
+		return jsonBlockMatch[1].trim();
+	}
 
-  // Try generic code block
-  const codeBlockMatch = jsonStr.match(/```\s*([\s\S]*?)```/);
-  if (codeBlockMatch) {
-    return codeBlockMatch[1].trim();
-  }
+	// Try generic code block
+	const codeBlockMatch = jsonStr.match(/```\s*([\s\S]*?)```/);
+	if (codeBlockMatch) {
+		return codeBlockMatch[1].trim();
+	}
 
-  // Try to find raw JSON object or array (starts with { or [)
-  const jsonObjectMatch = jsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  if (jsonObjectMatch) {
-    return jsonObjectMatch[1].trim();
-  }
+	// Try to find raw JSON object or array (starts with { or [)
+	const jsonObjectMatch = jsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+	if (jsonObjectMatch) {
+		return jsonObjectMatch[1].trim();
+	}
 
-  // Fallback: remove markdown code blocks if present at start/end
-  if (jsonStr.startsWith('```json')) {
-    jsonStr = jsonStr.slice(7);
-  } else if (jsonStr.startsWith('```')) {
-    jsonStr = jsonStr.slice(3);
-  }
+	// Fallback: remove markdown code blocks if present at start/end
+	if (jsonStr.startsWith("```json")) {
+		jsonStr = jsonStr.slice(7);
+	} else if (jsonStr.startsWith("```")) {
+		jsonStr = jsonStr.slice(3);
+	}
 
-  if (jsonStr.endsWith('```')) {
-    jsonStr = jsonStr.slice(0, -3);
-  }
+	if (jsonStr.endsWith("```")) {
+		jsonStr = jsonStr.slice(0, -3);
+	}
 
-  return jsonStr.trim();
+	return jsonStr.trim();
 }
 
 function buildFeatureContext(feature: FeatureWithClient): string {
-  const parts: string[] = [];
+	const parts: string[] = [];
 
-  parts.push(`Title: ${feature.title}`);
+	parts.push(`Title: ${feature.title}`);
 
-  if (feature.client?.name) {
-    parts.push(`Client: ${feature.client.name}`);
-  }
+	if (feature.client?.name) {
+		parts.push(`Client: ${feature.client.name}`);
+	}
 
-  if (feature.functionality_notes) {
-    parts.push(`\nFunctionality Notes:\n${feature.functionality_notes}`);
-  }
+	if (feature.functionality_notes) {
+		parts.push(`\nFunctionality Notes:\n${feature.functionality_notes}`);
+	}
 
-  if (feature.client_context) {
-    parts.push(`\nClient Context:\n${feature.client_context}`);
-  }
+	if (feature.client_context) {
+		parts.push(`\nClient Context:\n${feature.client_context}`);
+	}
 
-  return parts.join('\n');
+	return parts.join("\n");
 }
 
 export async function generateFeaturePrd(
-  featureId: string,
-  options: { clearExisting?: boolean } = {}
+	featureId: string,
+	options: { clearExisting?: boolean } = {},
 ): Promise<PrdGenerationResult> {
-  // 1. Get feature from database
-  const feature = await getFeature(featureId);
-  if (!feature) {
-    throw new Error(`Feature not found: ${featureId}`);
-  }
+	// 1. Get feature from database
+	const feature = await getFeature(featureId);
+	if (!feature) {
+		throw new Error(`Feature not found: ${featureId}`);
+	}
 
-  const featureContext = buildFeatureContext(feature);
-  console.log(`Generating PRD for feature: ${feature.title}`);
+	const featureContext = buildFeatureContext(feature);
+	console.log(`Generating PRD for feature: ${feature.title}`);
 
-  // 2. Generate PRD using Claude
-  const prdPrompt = PRD_PROMPT + featureContext;
-  console.log('Calling Claude for PRD generation...');
-  const prdResponse = await runClaudeForPrd(prdPrompt);
+	// 2. Generate PRD using Claude
+	const prdPrompt = PRD_PROMPT + featureContext;
+	console.log("Calling Claude for PRD generation...");
+	const prdResponse = await runClaudeForPrd(prdPrompt);
 
-  let prd: GeneratedPrd;
-  try {
-    const jsonStr = extractJson(prdResponse);
-    prd = JSON.parse(jsonStr);
-  } catch (err) {
-    throw new Error(`Failed to parse PRD response as JSON: ${err}. Response was: ${prdResponse.slice(0, 500)}`);
-  }
+	let prd: GeneratedPrd;
+	try {
+		const jsonStr = extractJson(prdResponse);
+		prd = JSON.parse(jsonStr);
+	} catch (err) {
+		throw new Error(
+			`Failed to parse PRD response as JSON: ${err}. Response was: ${prdResponse.slice(0, 500)}`,
+		);
+	}
 
-  // 3. Generate tasks using Claude
-  const tasksPrompt = TASKS_PROMPT + JSON.stringify(prd, null, 2);
-  console.log('Calling Claude for task generation...');
-  const tasksResponse = await runClaudeForPrd(tasksPrompt);
+	// 3. Generate tasks using Claude
+	const tasksPrompt = TASKS_PROMPT + JSON.stringify(prd, null, 2);
+	console.log("Calling Claude for task generation...");
+	const tasksResponse = await runClaudeForPrd(tasksPrompt);
 
-  let tasks: GeneratedTask[];
-  try {
-    const jsonStr = extractJson(tasksResponse);
-    tasks = JSON.parse(jsonStr);
-  } catch (err) {
-    throw new Error(`Failed to parse tasks response as JSON: ${err}. Response was: ${tasksResponse.slice(0, 500)}`);
-  }
+	let tasks: GeneratedTask[];
+	try {
+		const jsonStr = extractJson(tasksResponse);
+		tasks = JSON.parse(jsonStr);
+	} catch (err) {
+		throw new Error(
+			`Failed to parse tasks response as JSON: ${err}. Response was: ${tasksResponse.slice(0, 500)}`,
+		);
+	}
 
-  // 4. Clear existing todos if requested
-  if (options.clearExisting) {
-    const deleted = await deleteTodosByFeatureId(featureId);
-    console.log(`Deleted ${deleted} existing todos`);
-  }
+	// 4. Clear existing todos if requested
+	if (options.clearExisting) {
+		const deleted = await deleteTodosByFeatureId(featureId);
+		console.log(`Deleted ${deleted} existing todos`);
+	}
 
-  // 5. Save PRD to feature record
-  await updateFeaturePrd(featureId, prd);
-  console.log('Saved PRD to feature record');
+	// 5. Save PRD to feature record
+	await updateFeaturePrd(featureId, prd);
+	console.log("Saved PRD to feature record");
 
-  // 6. Create todos in database
-  const todoInserts: TodoInsert[] = tasks.map(task => ({
-    feature_id: featureId,
-    title: task.title,
-    description: task.description,
-    status: 'pending',
-    order_index: task.orderIndex
-  }));
+	// 6. Create todos in database
+	const todoInserts: TodoInsert[] = tasks.map((task) => ({
+		feature_id: featureId,
+		title: task.title,
+		description: task.description,
+		status: "pending",
+		order_index: task.orderIndex,
+	}));
 
-  const createdTodos = await createTodos(todoInserts);
-  console.log(`Created ${createdTodos.length} todos`);
+	const createdTodos = await createTodos(todoInserts);
+	console.log(`Created ${createdTodos.length} todos`);
 
-  return {
-    featureId,
-    featureTitle: feature.title,
-    prd,
-    tasks,
-    todosCreated: createdTodos.length
-  };
+	return {
+		featureId,
+		featureTitle: feature.title,
+		prd,
+		tasks,
+		todosCreated: createdTodos.length,
+	};
 }
