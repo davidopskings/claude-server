@@ -17,7 +17,7 @@ import {
   syncTodosFromPrd,
   updateFeatureWorkflowStage,
   createComment,
-  getClientToolByType,
+  getClientToolsByType,
   getFeature,
   updateFeaturePrd,
   createTodos,
@@ -997,30 +997,49 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
         }
       }
 
-      // Trigger Vercel preview deployment and add feature comment
+      // Trigger Vercel preview deployments for all configured projects and add feature comment
       if (job.feature_id && repo.client_id) {
         try {
-          const vercelTool = await getClientToolByType(repo.client_id, 'vercel');
-          if (vercelTool?.metadata?.githubRepoId) {
-            const deployment = await triggerVercelDeployment(
-              vercelTool.metadata.githubRepoId,
-              job.branch_name,
-              repo.client_id
-            );
+          const vercelTools = await getClientToolsByType(repo.client_id, 'vercel');
+          const deployments: { projectName: string; url: string; inspectorUrl: string }[] = [];
 
-            if (deployment) {
-              await addJobMessage(jobId, 'system', `Triggered Vercel preview: ${deployment.url}`);
+          for (const vercelTool of vercelTools) {
+            const metadata = typeof vercelTool.metadata === 'string'
+              ? JSON.parse(vercelTool.metadata)
+              : vercelTool.metadata;
 
-              // Add comment to feature with deployment link
-              const commentBody = `<p class="text-node">Preview deployment created: <a href="${deployment.url}" target="_blank">${deployment.url}</a></p><p class="text-node"><a href="${deployment.inspectorUrl}" target="_blank">View build status</a></p>`;
-              await createComment({
-                parentType: 'feature',
-                parentId: job.feature_id,
-                body: commentBody
-              });
+            if (metadata?.githubRepoId) {
+              try {
+                const projectName = metadata.projectName || vercelTool.external_id || 'Unknown Project';
+                const deployment = await triggerVercelDeploymentForTool(vercelTool, job.branch_name);
 
-              await addJobMessage(jobId, 'system', `Added deployment comment to feature`);
+                if (deployment) {
+                  deployments.push({
+                    projectName,
+                    url: deployment.url,
+                    inspectorUrl: deployment.inspectorUrl
+                  });
+                  await addJobMessage(jobId, 'system', `Triggered Vercel preview for ${projectName}: ${deployment.url}`);
+                }
+              } catch (err: any) {
+                await addJobMessage(jobId, 'system', `Vercel deployment failed for ${metadata.projectName || vercelTool.external_id}: ${err.message}`);
+              }
             }
+          }
+
+          // Add single comment with all deployment links
+          if (deployments.length > 0) {
+            const commentBody = deployments.map(d =>
+              `<p class="text-node"><strong>${d.projectName}</strong>: <a href="${d.url}" target="_blank">${d.url}</a> (<a href="${d.inspectorUrl}" target="_blank">build status</a>)</p>`
+            ).join('');
+
+            await createComment({
+              parentType: 'feature',
+              parentId: job.feature_id,
+              body: commentBody
+            });
+
+            await addJobMessage(jobId, 'system', `Added deployment comment to feature with ${deployments.length} preview(s)`);
           }
         } catch (err: any) {
           await addJobMessage(jobId, 'system', `Vercel deployment failed: ${err.message}`);
@@ -1332,27 +1351,39 @@ export async function runPrdGenerationJob(jobId: string): Promise<void> {
 }
 
 // Vercel deployment helper
-async function triggerVercelDeployment(
-  githubRepoId: string,
-  branchName: string,
-  clientId: string
+async function triggerVercelDeploymentForTool(
+  vercelTool: { external_id: string | null; metadata: any },
+  branchName: string
 ): Promise<{ url: string; inspectorUrl: string } | null> {
-  const vercelTool = await getClientToolByType(clientId, 'vercel');
-  if (!vercelTool?.metadata?.token) {
-    return null; // Vercel not configured for this client
+  const metadata = typeof vercelTool.metadata === 'string'
+    ? JSON.parse(vercelTool.metadata)
+    : vercelTool.metadata;
+
+  if (!metadata?.githubRepoId) {
+    return null;
+  }
+
+  // Resolve token from env var or use direct token
+  const token = metadata.tokenEnvVar
+    ? process.env[metadata.tokenEnvVar]
+    : metadata.token;
+
+  if (!token) {
+    console.error(`Vercel token not found: ${metadata.tokenEnvVar || 'no tokenEnvVar or token specified'}`);
+    return null;
   }
 
   const response = await fetch('https://api.vercel.com/v13/deployments', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${vercelTool.metadata.token}`,
+      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      name: vercelTool.metadata.projectName || vercelTool.external_id,
+      name: metadata.projectName || vercelTool.external_id,
       gitSource: {
         type: 'github',
-        repoId: githubRepoId,
+        repoId: metadata.githubRepoId,
         ref: branchName
       }
     })

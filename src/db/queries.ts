@@ -686,3 +686,17 @@ export async function getClientToolByType(
   if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows
   return data;
 }
+
+export async function getClientToolsByType(
+  clientId: string,
+  toolType: string
+): Promise<{ external_id: string | null; metadata: any }[]> {
+  const { data, error } = await supabase
+    .from('client_tools')
+    .select('external_id, metadata')
+    .eq('client_id', clientId)
+    .eq('tool_type', toolType);
+
+  if (error) throw error;
+  return data || [];
+}
