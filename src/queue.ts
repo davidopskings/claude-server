@@ -1,5 +1,5 @@
 import { getQueuedJobs, getRunningJobs, updateJob, getJob } from './db/index.js';
-import { runJob, runRalphJob, runRalphPrdJob, cancelJob as cancelRunningJob } from './runner.js';
+import { runJob, runRalphJob, runRalphPrdJob, runPrdGenerationJob, cancelJob as cancelRunningJob } from './runner.js';
 
 const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_JOBS || '2');
 
@@ -28,6 +28,8 @@ export async function processQueue(): Promise<void> {
       let runner = runJob;
       if (job.job_type === 'ralph') {
         runner = job.prd_mode ? runRalphPrdJob : runRalphJob;
+      } else if (job.job_type === 'prd_generation') {
+        runner = runPrdGenerationJob;
       }
       // Don't await - run in parallel
       runner(job.id)

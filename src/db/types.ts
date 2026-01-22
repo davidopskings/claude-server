@@ -1,7 +1,7 @@
 import type { Database } from '../types/supabase.js';
 
 // Job types
-export type JobType = 'code' | 'task' | 'ralph';
+export type JobType = 'code' | 'task' | 'ralph' | 'prd_generation';
 
 // Ralph-specific types
 export type RalphCompletionReason =

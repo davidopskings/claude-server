@@ -132,7 +132,25 @@ function extractJson(text: string): string {
   // Try to extract JSON from the response, handling markdown code blocks
   let jsonStr = text.trim();
 
-  // Remove markdown code blocks if present
+  // First, try to find JSON within markdown code blocks anywhere in the text
+  const jsonBlockMatch = jsonStr.match(/```json\s*([\s\S]*?)```/);
+  if (jsonBlockMatch) {
+    return jsonBlockMatch[1].trim();
+  }
+
+  // Try generic code block
+  const codeBlockMatch = jsonStr.match(/```\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    return codeBlockMatch[1].trim();
+  }
+
+  // Try to find raw JSON object or array (starts with { or [)
+  const jsonObjectMatch = jsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+  if (jsonObjectMatch) {
+    return jsonObjectMatch[1].trim();
+  }
+
+  // Fallback: remove markdown code blocks if present at start/end
   if (jsonStr.startsWith('```json')) {
     jsonStr = jsonStr.slice(7);
   } else if (jsonStr.startsWith('```')) {

@@ -414,6 +414,40 @@ app.post('/jobs/:id/retry', async (req: Request, res: Response) => {
   }
 });
 
+// Generate PRD for a feature (async job)
+app.post('/jobs/generate-prd', async (req: Request, res: Response) => {
+  try {
+    const { featureId, clientId } = req.body;
+
+    if (!featureId) {
+      return res.status(400).json({ error: 'featureId required' });
+    }
+
+    if (!clientId) {
+      return res.status(400).json({ error: 'clientId required' });
+    }
+
+    const job = await createJob({
+      clientId,
+      featureId,
+      jobType: 'prd_generation',
+      branchName: `prd-gen-${Date.now()}`,
+      prompt: '',
+      title: 'Generate PRD'
+    });
+
+    processQueue();
+
+    res.status(201).json({
+      id: job.id,
+      status: job.status,
+      featureId
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Send a message to an interactive task job (when Claude asks a question)
 app.post('/jobs/:id/message', async (req: Request, res: Response) => {
   try {

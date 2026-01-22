@@ -159,6 +159,14 @@ export async function createWorktree(
       `git worktree add "${worktreePath}" ${job.branch_name}`,
       { cwd: barePath, stdio: 'pipe' }
     );
+
+    // Pull latest from remote (in case someone pushed to this branch)
+    try {
+      execSync('git pull --ff-only', { cwd: worktreePath, stdio: 'pipe' });
+    } catch {
+      // Ignore if pull fails (e.g., diverged history) - we'll use what we have
+      console.log(`Warning: Could not fast-forward ${job.branch_name}, using local state`);
+    }
   } else {
     // Branch doesn't exist - get latest commit SHA from origin's default branch, then create new branch
     // Use ls-remote to get the exact SHA (atomic, no race conditions with FETCH_HEAD)

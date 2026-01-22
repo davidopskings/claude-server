@@ -18,7 +18,13 @@ import {
   updateFeatureWorkflowStage,
   createComment,
   getClientToolByType,
-  type CodeRepository
+  getFeature,
+  updateFeaturePrd,
+  createTodos,
+  deleteTodosByFeatureId,
+  type CodeRepository,
+  type FeatureWithClient,
+  type TodoInsert
 } from './db/index.js';
 
 // Workflow stage ID for "Ready for Review" (after Ralph completes)
@@ -1050,6 +1056,278 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 
   } finally {
     // Keep worktree for debugging - will be cleaned up on next job for same branch
+  }
+}
+
+// ===== PRD Generation Job Runner =====
+
+// PRD structure based on ai-dev-tasks pattern
+interface GeneratedPrd {
+  title: string;
+  overview: string;
+  goals: string[];
+  userStories: string[];
+  functionalRequirements: string[];
+  nonGoals: string[];
+  technicalConsiderations: string[];
+  successMetrics: string[];
+}
+
+interface GeneratedTask {
+  title: string;
+  description: string;
+  orderIndex: number;
+}
+
+// Prompts for PRD generation
+const PRD_PROMPT = `You are a product manager creating a PRD (Product Requirements Document) for a development feature.
+
+Based on the feature information provided, generate a comprehensive PRD in JSON format.
+
+IMPORTANT: Your response must be ONLY valid JSON, no markdown, no explanation, just the JSON object.
+
+The JSON structure must be:
+{
+  "title": "Feature title",
+  "overview": "Brief 2-3 sentence description of what this feature does and why it matters",
+  "goals": ["Goal 1", "Goal 2", ...],
+  "userStories": ["As a [user], I want to [action] so that [benefit]", ...],
+  "functionalRequirements": ["Requirement 1", "Requirement 2", ...],
+  "nonGoals": ["What this feature will NOT do", ...],
+  "technicalConsiderations": ["Technical note 1", ...],
+  "successMetrics": ["How to measure success", ...]
+}
+
+Guidelines:
+- Write for junior developers - be explicit and unambiguous
+- Goals should be measurable outcomes
+- User stories should follow the standard format
+- Functional requirements should be specific and testable
+- Non-goals help define scope boundaries
+- Technical considerations should inform implementation approach
+- Success metrics should be quantifiable where possible
+
+Feature Information:
+`;
+
+const TASKS_PROMPT = `You are a technical lead breaking down a PRD into implementation tasks.
+
+Based on the PRD provided, generate a detailed task list in JSON format.
+
+IMPORTANT: Your response must be ONLY valid JSON, no markdown, no explanation, just the JSON array.
+
+The JSON structure must be an array of tasks:
+[
+  {
+    "title": "Short task title (5-10 words)",
+    "description": "Detailed description with implementation guidance for a junior developer",
+    "orderIndex": 1
+  },
+  ...
+]
+
+Guidelines:
+- Start with "Create feature branch" as task 0
+- Break down into granular, actionable sub-tasks
+- Each task should be completable in 1-4 hours
+- Target junior developers - include implementation hints
+- Order tasks logically (dependencies first)
+- Include testing tasks where appropriate
+- Aim for 5-15 tasks depending on complexity
+
+PRD:
+`;
+
+function extractJsonFromResponse(text: string): string {
+  let jsonStr = text.trim();
+
+  // First, try to find JSON within markdown code blocks anywhere in the text
+  const jsonBlockMatch = jsonStr.match(/```json\s*([\s\S]*?)```/);
+  if (jsonBlockMatch) {
+    return jsonBlockMatch[1].trim();
+  }
+
+  // Try generic code block
+  const codeBlockMatch = jsonStr.match(/```\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    return codeBlockMatch[1].trim();
+  }
+
+  // Try to find raw JSON object or array (starts with { or [)
+  const jsonObjectMatch = jsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+  if (jsonObjectMatch) {
+    return jsonObjectMatch[1].trim();
+  }
+
+  return jsonStr.trim();
+}
+
+function buildFeatureContext(feature: FeatureWithClient): string {
+  const parts: string[] = [];
+
+  parts.push(`Title: ${feature.title}`);
+
+  if (feature.client?.name) {
+    parts.push(`Client: ${feature.client.name}`);
+  }
+
+  if (feature.functionality_notes) {
+    parts.push(`\nFunctionality Notes:\n${feature.functionality_notes}`);
+  }
+
+  if (feature.client_context) {
+    parts.push(`\nClient Context:\n${feature.client_context}`);
+  }
+
+  return parts.join('\n');
+}
+
+async function runClaudeForPrdGeneration(
+  prompt: string,
+  jobId: string
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let output = '';
+    let errorOutput = '';
+
+    const proc = spawn(CLAUDE_BIN, [
+      '--print',
+      '--dangerously-skip-permissions',
+      '--output-format', 'text',
+      prompt
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: HOME_DIR },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    runningProcesses.set(jobId, proc);
+
+    proc.stdout.on('data', (data: Buffer) => {
+      output += data.toString();
+    });
+
+    proc.stderr.on('data', (data: Buffer) => {
+      errorOutput += data.toString();
+    });
+
+    proc.on('close', (code: number | null) => {
+      runningProcesses.delete(jobId);
+      if (code !== 0) {
+        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
+      } else {
+        resolve(output.trim());
+      }
+    });
+
+    proc.on('error', (err: Error) => {
+      runningProcesses.delete(jobId);
+      reject(err);
+    });
+  });
+}
+
+export async function runPrdGenerationJob(jobId: string): Promise<void> {
+  const job = await getJob(jobId);
+  if (!job) throw new Error(`Job not found: ${jobId}`);
+
+  const featureId = job.feature_id;
+  if (!featureId) {
+    await updateJob(jobId, {
+      status: 'failed',
+      error: 'No feature_id provided for PRD generation job',
+      completed_at: new Date().toISOString()
+    });
+    return;
+  }
+
+  try {
+    // Update status to running
+    await updateJob(jobId, {
+      status: 'running',
+      started_at: new Date().toISOString()
+    });
+
+    // 1. Get feature from database
+    const feature = await getFeature(featureId);
+    if (!feature) {
+      throw new Error(`Feature not found: ${featureId}`);
+    }
+
+    const featureContext = buildFeatureContext(feature);
+    await addJobMessage(jobId, 'system', `Generating PRD for feature: ${feature.title}`);
+
+    // 2. Generate PRD using Claude
+    const prdPrompt = PRD_PROMPT + featureContext;
+    await addJobMessage(jobId, 'system', 'Calling Claude for PRD generation...');
+    const prdResponse = await runClaudeForPrdGeneration(prdPrompt, jobId);
+
+    let prd: GeneratedPrd;
+    try {
+      const jsonStr = extractJsonFromResponse(prdResponse);
+      prd = JSON.parse(jsonStr);
+    } catch (err) {
+      throw new Error(`Failed to parse PRD response as JSON: ${err}. Response was: ${prdResponse.slice(0, 500)}`);
+    }
+
+    await addJobMessage(jobId, 'system', `PRD generated: "${prd.title}"`);
+
+    // 3. Generate tasks using Claude
+    const tasksPrompt = TASKS_PROMPT + JSON.stringify(prd, null, 2);
+    await addJobMessage(jobId, 'system', 'Calling Claude for task generation...');
+    const tasksResponse = await runClaudeForPrdGeneration(tasksPrompt, jobId);
+
+    let tasks: GeneratedTask[];
+    try {
+      const jsonStr = extractJsonFromResponse(tasksResponse);
+      tasks = JSON.parse(jsonStr);
+    } catch (err) {
+      throw new Error(`Failed to parse tasks response as JSON: ${err}. Response was: ${tasksResponse.slice(0, 500)}`);
+    }
+
+    await addJobMessage(jobId, 'system', `Generated ${tasks.length} tasks`);
+
+    // 4. Clear existing todos (PRD generation always replaces)
+    const deleted = await deleteTodosByFeatureId(featureId);
+    if (deleted > 0) {
+      await addJobMessage(jobId, 'system', `Deleted ${deleted} existing todos`);
+    }
+
+    // 5. Save PRD to feature record
+    await updateFeaturePrd(featureId, prd);
+    await addJobMessage(jobId, 'system', 'Saved PRD to feature record');
+
+    // 6. Create todos in database
+    const todoInserts: TodoInsert[] = tasks.map(task => ({
+      feature_id: featureId,
+      title: task.title,
+      description: task.description,
+      status: 'pending',
+      order_index: task.orderIndex
+    }));
+
+    const createdTodos = await createTodos(todoInserts);
+    await addJobMessage(jobId, 'system', `Created ${createdTodos.length} todos`);
+
+    // 7. Mark job as completed
+    await updateJob(jobId, {
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      exit_code: 0
+    });
+
+    await addJobMessage(jobId, 'system', `PRD generation completed successfully!`);
+
+  } catch (err: any) {
+    console.error(`PRD generation job ${jobId} failed:`, err);
+
+    await updateJob(jobId, {
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      error: err.message || String(err)
+    });
+
+    await addJobMessage(jobId, 'system', `PRD generation failed: ${err.message}`);
   }
 }
 
