@@ -1,4 +1,4 @@
-import type { Database } from "../types/supabase.js";
+import type { Database, Json } from "../types/supabase.js";
 import { supabase } from "./client.js";
 import type {
 	AgentJob,
@@ -199,6 +199,8 @@ export async function createJob(job: {
 	// PRD mode fields
 	prdMode?: boolean;
 	prd?: Prd;
+	// Spec mode fields - full spec output for runRalphSpecJob
+	specOutput?: SpecOutput;
 }): Promise<AgentJob> {
 	const insert: AgentJobInsert = {
 		client_id: job.clientId,
@@ -225,6 +227,10 @@ export async function createJob(job: {
 						commits: [],
 					} as PrdProgress),
 				)
+			: undefined,
+		// Spec mode - store specMode flag for queue routing
+		spec_output: job.specOutput
+			? JSON.parse(JSON.stringify(job.specOutput))
 			: undefined,
 	};
 
@@ -794,20 +800,29 @@ export async function updateFeatureSpecPhase(
 // Create a spec job
 export async function createSpecJob(params: {
 	clientId: string;
-	featureId: string;
+	featureId: string | null;
 	repositoryId?: string;
 	specPhase: SpecPhase;
 	createdByTeamMemberId?: string;
+	specOutput?: Record<string, unknown>;
 }): Promise<AgentJob> {
+	// Generate branch name based on featureId or clientId
+	const branchSlug = params.featureId
+		? `spec-${params.featureId.slice(0, 8)}`
+		: `constitution-${params.clientId.slice(0, 8)}`;
+
 	const insert: AgentJobInsert = {
 		client_id: params.clientId,
 		feature_id: params.featureId,
 		repository_id: params.repositoryId,
 		prompt: `Run Spec-Kit phase: ${params.specPhase}`,
-		branch_name: `spec-${params.featureId.slice(0, 8)}-${Date.now()}`,
+		branch_name: `${branchSlug}-${Date.now()}`,
 		title: `Spec-Kit: ${params.specPhase}`,
 		job_type: "spec",
 		spec_phase: params.specPhase,
+		spec_output: params.specOutput
+			? (params.specOutput as unknown as Json)
+			: null,
 		created_by_team_member_id: params.createdByTeamMemberId,
 		status: "queued",
 	};
@@ -837,16 +852,72 @@ export async function getSpecJobsForFeature(
 	return data || [];
 }
 
+// Get all client tools of a specific type (e.g., multiple Vercel projects)
 export async function getClientToolsByType(
-  clientId: string,
-  toolType: string
-): Promise<{ external_id: string | null; metadata: any }[]> {
-  const { data, error } = await supabase
-    .from('client_tools')
-    .select('external_id, metadata')
-    .eq('client_id', clientId)
-    .eq('tool_type', toolType);
+	clientId: string,
+	toolType: string,
+): Promise<{ external_id: string | null; metadata: unknown }[]> {
+	const { data, error } = await supabase
+		.from("client_tools")
+		.select("external_id, metadata")
+		.eq("client_id", clientId)
+		.eq("tool_type", toolType);
 
-  if (error) throw error;
-  return data || [];
+	if (error) throw error;
+	return data || [];
+}
+
+// ----- Client Constitution -----
+
+export interface ClientConstitution {
+	constitution: string;
+	generatedAt: string;
+}
+
+// Get client's constitution (if exists)
+export async function getClientConstitution(
+	clientId: string,
+): Promise<ClientConstitution | null> {
+	// constitution and constitution_generated_at columns added via migration 0012
+	// These columns won't be in generated types until types are regenerated
+	const { data, error } = await supabase
+		.from("clients")
+		.select("*")
+		.eq("id", clientId)
+		.single();
+
+	if (error && error.code !== "PGRST116") throw error;
+	if (!data) return null;
+
+	// Type assertion since columns may not be in generated types yet
+	const clientData = data as unknown as {
+		constitution: string | null;
+		constitution_generated_at: string | null;
+	};
+
+	if (!clientData.constitution) return null;
+
+	return {
+		constitution: clientData.constitution,
+		generatedAt:
+			clientData.constitution_generated_at || new Date().toISOString(),
+	};
+}
+
+// Update client's constitution
+export async function updateClientConstitution(
+	clientId: string,
+	constitution: string,
+): Promise<void> {
+	// constitution and constitution_generated_at columns added via migration 0012
+	const { error } = await supabase
+		.from("clients")
+		.update({
+			constitution,
+			constitution_generated_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+		} as unknown as Database["public"]["Tables"]["clients"]["Update"])
+		.eq("id", clientId);
+
+	if (error) throw error;
 }

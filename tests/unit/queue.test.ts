@@ -11,15 +11,25 @@ import type { AgentJob, JobType } from "../../src/db/types.js";
 
 describe("Queue Job Routing Logic", () => {
 	// Test the routing decision logic that would be in processQueue
+	// Updated to include spec_mode routing for runRalphSpecJob
 	function getRunnerForJob(job: {
 		job_type: JobType;
 		prd_mode?: boolean;
+		spec_output?: { specMode?: boolean } | null;
 	}): string {
 		if (job.job_type === "spec") {
 			return "runSpecJob";
 		}
 		if (job.job_type === "ralph") {
-			return job.prd_mode ? "runRalphPrdJob" : "runRalphJob";
+			// Check spec_output for specMode flag (set by API when creating spec-mode Ralph job)
+			const specOutput = job.spec_output as { specMode?: boolean } | null;
+			if (specOutput?.specMode) {
+				return "runRalphSpecJob";
+			}
+			if (job.prd_mode) {
+				return "runRalphPrdJob";
+			}
+			return "runRalphJob";
 		}
 		return "runJob";
 	}
@@ -48,6 +58,31 @@ describe("Queue Job Routing Logic", () => {
 		it("should route spec jobs to runSpecJob", () => {
 			const runner = getRunnerForJob({ job_type: "spec" });
 			expect(runner).toBe("runSpecJob");
+		});
+
+		it("should route ralph spec_mode jobs to runRalphSpecJob", () => {
+			const runner = getRunnerForJob({
+				job_type: "ralph",
+				spec_output: { specMode: true },
+			});
+			expect(runner).toBe("runRalphSpecJob");
+		});
+
+		it("should prioritize spec_mode over prd_mode for ralph", () => {
+			const runner = getRunnerForJob({
+				job_type: "ralph",
+				prd_mode: true,
+				spec_output: { specMode: true },
+			});
+			expect(runner).toBe("runRalphSpecJob");
+		});
+
+		it("should handle null spec_output for ralph", () => {
+			const runner = getRunnerForJob({
+				job_type: "ralph",
+				spec_output: null,
+			});
+			expect(runner).toBe("runRalphJob");
 		});
 	});
 });

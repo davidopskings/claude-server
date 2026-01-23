@@ -8,7 +8,12 @@ import {
 	updateFeatureSpecOutput,
 	updateJob,
 } from "../db/index.js";
-import { getRepositoryByClientId, getRepositoryById } from "../db/queries.js";
+import {
+	getClientConstitution,
+	getRepositoryByClientId,
+	getRepositoryById,
+	updateClientConstitution,
+} from "../db/queries.js";
 import type { SpecOutput, SpecPhase } from "../db/types.js";
 import { createWorktree, ensureBareRepo, fetchOrigin } from "../git.js";
 import {
@@ -175,6 +180,30 @@ export async function runSpecJob(jobId: string): Promise<void> {
 		// Load existing spec output from feature
 		const existingOutput = await getFeatureSpecOutput(job.feature_id);
 
+		// Check if we should use existing client constitution (for constitution phase)
+		// forceRegenerate can be set via job.spec_output.forceRegenerate
+		const forceRegenerate =
+			(job.spec_output as { forceRegenerate?: boolean } | null)
+				?.forceRegenerate === true;
+
+		let useExistingConstitution = false;
+		let clientConstitution: string | null = null;
+
+		if (specPhase === "constitution" && !forceRegenerate) {
+			const existingClientConstitution = await getClientConstitution(
+				job.client_id,
+			);
+			if (existingClientConstitution) {
+				clientConstitution = existingClientConstitution.constitution;
+				useExistingConstitution = true;
+				await addJobMessage(
+					jobId,
+					"system",
+					`Using existing client constitution (generated ${existingClientConstitution.generatedAt})`,
+				);
+			}
+		}
+
 		// Build context for prompt (including memories)
 		const memoriesContext =
 			relevantMemories.length > 0
@@ -186,7 +215,7 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			featureDescription: feature.functionality_notes || undefined,
 			clientName: feature.client?.name || "Unknown",
 			repoName: `${repo.owner_name}/${repo.repo_name}`,
-			existingConstitution: existingOutput?.constitution,
+			existingConstitution: clientConstitution || existingOutput?.constitution,
 			existingSpec: existingOutput?.spec
 				? JSON.stringify(existingOutput.spec, null, 2)
 				: undefined,
@@ -202,33 +231,86 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			relevantMemories: memoriesContext,
 		};
 
-		// Build prompt for this phase
-		const promptBuilder = getPhasePromptBuilder(specPhase);
-		const prompt = promptBuilder(promptContext);
+		// If using existing client constitution, skip Claude and use it directly
+		let result: { exitCode: number; output: string; error?: string };
+		let parseResult: ReturnType<typeof parseSpecOutput>;
 
-		await addJobMessage(
-			jobId,
-			"system",
-			`Running Claude Code for ${phaseInfo.name} phase...`,
-		);
-
-		// Run Claude Code
-		const result = await runClaudeForSpec(prompt, worktreePath, jobId);
-
-		if (result.exitCode !== 0) {
-			throw new Error(
-				result.error || `Claude Code exited with code ${result.exitCode}`,
+		if (useExistingConstitution && clientConstitution) {
+			// Use existing constitution without running Claude
+			result = { exitCode: 0, output: clientConstitution };
+			parseResult = {
+				success: true,
+				output: { constitution: clientConstitution },
+			};
+			await addJobMessage(
+				jobId,
+				"system",
+				"Skipped Claude run - using existing client constitution",
 			);
-		}
+		} else {
+			// Build prompt for this phase
+			const promptBuilder = getPhasePromptBuilder(specPhase);
+			const prompt = promptBuilder(promptContext);
 
-		// Parse Claude's output
-		const parsedOutput = parseSpecOutput(result.output, specPhase);
+			await addJobMessage(
+				jobId,
+				"system",
+				`Running Claude Code for ${phaseInfo.name} phase...`,
+			);
+
+			// Run Claude Code
+			result = await runClaudeForSpec(prompt, worktreePath, jobId);
+
+			if (result.exitCode !== 0) {
+				throw new Error(
+					result.error || `Claude Code exited with code ${result.exitCode}`,
+				);
+			}
+
+			// Note: raw output is already streamed to job_messages via addJobMessage in runClaudeForSpec
+			// Parse Claude's output
+			parseResult = parseSpecOutput(result.output, specPhase);
+
+			// Handle parse failure - output is already saved above
+			if (!parseResult.success) {
+				await addJobMessage(
+					jobId,
+					"stderr",
+					`Failed to parse spec output: ${parseResult.error}\nLast 500 chars: ${parseResult.rawOutput}`,
+				);
+				throw new Error(
+					`Spec phase ${specPhase} failed: ${parseResult.error}. Output may have been truncated.`,
+				);
+			}
+
+			// Save constitution to client for reuse across features
+			if (specPhase === "constitution" && parseResult.output.constitution) {
+				try {
+					await updateClientConstitution(
+						job.client_id,
+						parseResult.output.constitution,
+					);
+					await addJobMessage(
+						jobId,
+						"system",
+						"Saved constitution to client for reuse across features",
+					);
+				} catch (saveErr) {
+					// Log but don't fail - constitution is still saved to feature
+					await addJobMessage(
+						jobId,
+						"system",
+						`Warning: Failed to save constitution to client: ${(saveErr as Error).message}`,
+					);
+				}
+			}
+		}
 
 		// Merge with existing output
 		const mergedOutput: SpecOutput = {
 			...existingOutput,
 			phase: specPhase,
-			...parsedOutput,
+			...parseResult.output,
 		};
 
 		// Save to feature
@@ -417,9 +499,12 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			}
 			if (specPhase === "plan" && mergedOutput.plan) {
 				const techDecisions =
-					(mergedOutput.plan as { techDecisions?: string[] })?.techDecisions ||
+					(mergedOutput.plan as { techDecisions?: unknown[] })?.techDecisions ||
 					[];
-				discoveries.insights = techDecisions;
+				// Convert any non-strings to strings
+				discoveries.insights = techDecisions.map((td) =>
+					typeof td === "string" ? td : JSON.stringify(td),
+				);
 			}
 
 			if (Object.keys(discoveries).length > 0) {
@@ -545,36 +630,141 @@ async function runClaudeForSpec(
 	});
 }
 
-// Parse Claude's output to extract the JSON
-function parseSpecOutput(
-	output: string,
-	phase: SpecPhase,
-): Partial<SpecOutput> {
-	// Try to find JSON in the output
-	const jsonMatch = output.match(/```json\s*([\s\S]*?)```/);
-	if (jsonMatch) {
-		try {
-			const parsed = JSON.parse(jsonMatch[1]);
-			return mapParsedToSpecOutput(parsed, phase);
-		} catch (e) {
-			console.error("Failed to parse JSON from output:", e);
+// Result type for parseSpecOutput
+type ParseResult =
+	| { success: true; output: Partial<SpecOutput> }
+	| { success: false; error: string; rawOutput: string };
+
+// Fix common JSON issues from LLM output (unescaped newlines in strings)
+function fixJsonString(json: string): string {
+	// Replace literal newlines inside JSON strings with \n
+	// This regex finds strings and escapes any raw newlines inside them
+	const fixed = json;
+	let inString = false;
+	let escaped = false;
+	let result = "";
+
+	for (let i = 0; i < fixed.length; i++) {
+		const char = fixed[i];
+
+		if (escaped) {
+			result += char;
+			escaped = false;
+			continue;
 		}
+
+		if (char === "\\") {
+			escaped = true;
+			result += char;
+			continue;
+		}
+
+		if (char === '"') {
+			inString = !inString;
+			result += char;
+			continue;
+		}
+
+		if (inString && char === "\n") {
+			result += "\\n";
+			continue;
+		}
+
+		if (inString && char === "\r") {
+			result += "\\r";
+			continue;
+		}
+
+		if (inString && char === "\t") {
+			result += "\\t";
+			continue;
+		}
+
+		result += char;
 	}
 
-	// Try to find raw JSON object
+	return result;
+}
+
+// Try to parse JSON with fallback to fixed version
+function tryParseJson(
+	json: string,
+): { parsed: unknown; fixed: boolean } | null {
+	// First try as-is
+	try {
+		return { parsed: JSON.parse(json), fixed: false };
+	} catch {
+		// Try with fixes applied
+		try {
+			const fixed = fixJsonString(json);
+			return { parsed: JSON.parse(fixed), fixed: true };
+		} catch {
+			return null;
+		}
+	}
+}
+
+// Parse Claude's output to extract the JSON
+function parseSpecOutput(output: string, phase: SpecPhase): ParseResult {
+	const errors: string[] = [];
+
+	// Try to find ALL json code blocks and parse each one (last one is usually the answer)
+	const jsonBlocks = [...output.matchAll(/```json\s*([\s\S]*?)```/g)];
+	if (jsonBlocks.length > 0) {
+		// Try from last to first (final answer is usually last)
+		for (let i = jsonBlocks.length - 1; i >= 0; i--) {
+			const result = tryParseJson(jsonBlocks[i][1]);
+			if (result) {
+				if (result.fixed) {
+					console.log("JSON parsed after fixing escaped characters");
+				}
+				return {
+					success: true,
+					output: mapParsedToSpecOutput(result.parsed as ParsedSpecJson, phase),
+				};
+			}
+			errors.push(`Block ${i + 1}: parse failed`);
+		}
+		console.error(
+			`Failed to parse ${jsonBlocks.length} JSON blocks:`,
+			errors.join("; "),
+		);
+	}
+
+	// Try to find the largest raw JSON object (greedy match from first { to last })
 	const rawJsonMatch = output.match(/\{[\s\S]*\}/);
 	if (rawJsonMatch) {
-		try {
-			const parsed = JSON.parse(rawJsonMatch[0]);
-			return mapParsedToSpecOutput(parsed, phase);
-		} catch (e) {
-			console.error("Failed to parse raw JSON from output:", e);
+		const result = tryParseJson(rawJsonMatch[0]);
+		if (result) {
+			if (result.fixed) {
+				console.log("Raw JSON parsed after fixing escaped characters");
+			}
+			return {
+				success: true,
+				output: mapParsedToSpecOutput(result.parsed as ParsedSpecJson, phase),
+			};
 		}
+		errors.push("Raw JSON: parse failed");
+		console.error("Failed to parse raw JSON from output");
 	}
 
-	// Return empty partial if we couldn't parse
+	// Check if output looks truncated
+	const trimmed = output.trimEnd();
+	const likelyTruncated =
+		trimmed.endsWith('"') ||
+		trimmed.endsWith(",") ||
+		(output.includes("```json") && !output.includes("```\n"));
+
+	// Return error if we couldn't parse
 	console.error("Could not find valid JSON in Claude output");
-	return {};
+	const errorDetail = errors.length > 0 ? ` (${errors.join("; ")})` : "";
+	return {
+		success: false,
+		error: likelyTruncated
+			? `Output truncated - no valid JSON found${errorDetail}`
+			: `No valid JSON found in output${errorDetail}`,
+		rawOutput: output.slice(-500),
+	};
 }
 
 // Parsed JSON type for spec outputs

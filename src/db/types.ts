@@ -55,6 +55,7 @@ export interface SpecOutput {
 		description: string;
 		files: string[];
 		dependencies: number[];
+		completed?: boolean;
 	}[];
 }
 

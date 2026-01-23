@@ -27,10 +27,12 @@ import {
 } from "./db/index.js";
 import {
 	createSpecJob,
+	getClientConstitution,
 	getFeature,
 	getFeatureSpecOutput,
 	getRepositoryByClientId,
 	getSpecJobsForFeature,
+	updateFeatureSpecOutput,
 } from "./db/queries.js";
 import type { SpecPhase } from "./db/types.js";
 import {
@@ -204,7 +206,7 @@ app.get("/clients/:id", async (req: Request, res: Response) => {
 // Add repository to client
 app.post("/clients/:id/repository", async (req: Request, res: Response) => {
 	try {
-		const { githubOrg, githubRepo, defaultBranch } = req.body;
+		const { githubOrg, githubRepo, defaultBranch } = req.body ?? {};
 
 		if (!githubOrg || !githubRepo) {
 			return res
@@ -224,6 +226,86 @@ app.post("/clients/:id/repository", async (req: Request, res: Response) => {
 		res.status(500).json({ error: (err as Error).message });
 	}
 });
+
+// Get client constitution (returns existing or null)
+app.get(
+	"/clients/:clientId/constitution",
+	async (req: Request, res: Response) => {
+		try {
+			const clientId = getParam(req.params, "clientId");
+
+			const client = await getClient(clientId);
+			if (!client) {
+				return res.status(404).json({ error: "Client not found" });
+			}
+
+			const constitution = await getClientConstitution(clientId);
+			if (!constitution) {
+				return res.json({
+					clientId,
+					constitution: null,
+					generatedAt: null,
+					message: "No constitution generated yet",
+				});
+			}
+
+			res.json({
+				clientId,
+				constitution: constitution.constitution,
+				generatedAt: constitution.generatedAt,
+			});
+		} catch (err) {
+			res.status(500).json({ error: (err as Error).message });
+		}
+	},
+);
+
+// Force regenerate client constitution (POST triggers spec job for constitution phase)
+app.post(
+	"/clients/:clientId/constitution",
+	async (req: Request, res: Response) => {
+		try {
+			const clientId = getParam(req.params, "clientId");
+			const { createdByTeamMemberId } = req.body ?? {};
+
+			const client = await getClient(clientId);
+			if (!client) {
+				return res.status(404).json({ error: "Client not found" });
+			}
+
+			// Get repository for the client
+			const repo = await getRepositoryByClientId(clientId);
+			if (!repo) {
+				return res
+					.status(400)
+					.json({ error: "No repository found for client" });
+			}
+
+			// Create a spec job just for constitution regeneration
+			// Using a special marker in spec_output to indicate force regeneration
+			const job = await createSpecJob({
+				clientId,
+				featureId: null, // No feature - client-level constitution
+				repositoryId: repo.id,
+				specPhase: "constitution",
+				createdByTeamMemberId,
+				specOutput: { forceRegenerate: true },
+			});
+
+			// Trigger queue processing
+			processQueue();
+
+			res.status(201).json({
+				jobId: job.id,
+				clientId,
+				message: "Constitution regeneration started",
+				status: job.status,
+			});
+		} catch (err) {
+			res.status(500).json({ error: (err as Error).message });
+		}
+	},
+);
 
 // ----- Jobs -----
 
@@ -285,10 +367,16 @@ app.post("/jobs", async (req: Request, res: Response) => {
 			// PRD mode parameters
 			prdMode,
 			prd,
-		} = req.body;
+			// Spec mode parameters (new Spec-Kit flow)
+			specMode,
+		} = req.body ?? {};
 
 		// Track loaded feature for branch name generation
 		let loadedFeature: Awaited<ReturnType<typeof getFeatureWithPrdAndTodos>> =
+			null;
+
+		// Track loaded spec output for storing on job (spec mode)
+		let loadedSpecOutput: Awaited<ReturnType<typeof getFeatureSpecOutput>> =
 			null;
 
 		// Validate ralph-specific parameters
@@ -369,6 +457,61 @@ app.post("/jobs", async (req: Request, res: Response) => {
 					}
 				}
 			}
+
+			// Validate Spec mode (new Spec-Kit flow)
+			if (specMode) {
+				if (!featureId) {
+					return res.status(400).json({
+						error: "specMode requires featureId",
+					});
+				}
+
+				// Load spec_output from feature
+				const specOutput = await getFeatureSpecOutput(featureId);
+				loadedSpecOutput = specOutput;
+				if (!specOutput) {
+					return res.status(400).json({
+						error:
+							"Feature has no spec_output. Run Spec-Kit first (move to spec_ready stage).",
+					});
+				}
+
+				if (
+					!specOutput.tasks ||
+					!Array.isArray(specOutput.tasks) ||
+					specOutput.tasks.length === 0
+				) {
+					return res.status(400).json({
+						error:
+							"Spec has no tasks. Complete all Spec-Kit phases first (through tasks phase).",
+					});
+				}
+
+				// Load feature for title and other info
+				loadedFeature = await getFeatureWithPrdAndTodos(featureId);
+				if (!loadedFeature) {
+					return res
+						.status(404)
+						.json({ error: `Feature not found: ${featureId}` });
+				}
+
+				// Convert spec tasks to PRD format (Ralph uses PRD internally)
+				finalPrd = {
+					title: loadedFeature.title,
+					description:
+						specOutput.spec?.overview || loadedFeature.client_context || "",
+					stories: specOutput.tasks.map((task) => ({
+						id: task.id,
+						title: task.title,
+						description: `${task.description}\n\nFiles: ${task.files.join(", ")}`,
+						acceptanceCriteria: specOutput.spec?.acceptanceCriteria || [],
+						passes: false,
+					})),
+				};
+				console.log(
+					`Loaded spec from feature ${featureId} with ${finalPrd.stories.length} tasks`,
+				);
+			}
 		}
 
 		// Generate branch name: use provided, or generate from feature, or fallback to job type + timestamp
@@ -387,7 +530,11 @@ app.post("/jobs", async (req: Request, res: Response) => {
 					: null;
 		}
 
-		if (!prompt || !finalBranchName) {
+		// For specMode, prompt is optional (the spec runner uses spec_output directly)
+		const finalPrompt =
+			prompt || (specMode ? "Implement feature according to spec." : null);
+
+		if (!finalPrompt || !finalBranchName) {
 			return res.status(400).json({ error: "prompt and branchName required" });
 		}
 
@@ -426,7 +573,7 @@ app.post("/jobs", async (req: Request, res: Response) => {
 			clientId: finalClientId,
 			featureId,
 			repositoryId: finalRepositoryId,
-			prompt,
+			prompt: finalPrompt,
 			branchName: finalBranchName,
 			title,
 			jobType,
@@ -436,9 +583,11 @@ app.post("/jobs", async (req: Request, res: Response) => {
 			completionPromise:
 				jobType === "ralph" ? completionPromise || "RALPH_COMPLETE" : undefined,
 			feedbackCommands: jobType === "ralph" ? feedbackCommands : undefined,
-			// PRD mode fields
-			prdMode: jobType === "ralph" ? prdMode : undefined,
-			prd: jobType === "ralph" && prdMode ? finalPrd : undefined,
+			// PRD mode fields (specMode also uses PRD format internally)
+			prdMode: jobType === "ralph" ? prdMode || specMode : undefined,
+			prd: jobType === "ralph" && (prdMode || specMode) ? finalPrd : undefined,
+			// Spec mode - store full spec_output for runRalphSpecJob
+			specOutput: specMode && loadedSpecOutput ? loadedSpecOutput : undefined,
 		});
 
 		// Trigger queue processing
@@ -458,7 +607,9 @@ app.post("/jobs", async (req: Request, res: Response) => {
 				maxIterations: job.max_iterations,
 				completionPromise: job.completion_promise,
 				prdMode: job.prd_mode,
-				storiesCount: prdMode ? finalPrd?.stories?.length : undefined,
+				specMode: specMode || false,
+				storiesCount:
+					prdMode || specMode ? finalPrd?.stories?.length : undefined,
 			}),
 		});
 	} catch (err) {
@@ -568,7 +719,7 @@ app.post('/jobs/generate-prd', async (req: Request, res: Response) => {
 // Send a message to an interactive task job (when Claude asks a question)
 app.post("/jobs/:id/message", async (req: Request, res: Response) => {
 	try {
-		const { message } = req.body;
+		const { message } = req.body ?? {};
 
 		if (!message) {
 			return res.status(400).json({ error: "message required" });
@@ -739,7 +890,7 @@ app.post(
 	async (req: Request, res: Response) => {
 		try {
 			const featureId = getParam(req.params, "featureId");
-			const { clearExisting } = req.body;
+			const { clearExisting } = req.body ?? {};
 
 			console.log(`Generating PRD and tasks for feature: ${featureId}`);
 
@@ -768,12 +919,13 @@ app.post(
 // ----- Spec-Kit Endpoints -----
 
 // Start spec-kit for a feature (runs constitution phase)
+// Set forceRegenerate: true to regenerate constitution even if client already has one
 app.post(
 	"/features/:featureId/spec/start",
 	async (req: Request, res: Response) => {
 		try {
 			const featureId = getParam(req.params, "featureId");
-			const { createdByTeamMemberId } = req.body;
+			const { createdByTeamMemberId, forceRegenerate } = req.body ?? {};
 
 			// Get feature to verify it exists and get client_id
 			const feature = await getFeature(featureId);
@@ -792,12 +944,14 @@ app.post(
 			}
 
 			// Create spec job for constitution phase
+			// Pass forceRegenerate in spec_output so spec runner knows to regenerate
 			const job = await createSpecJob({
 				clientId: feature.client_id,
 				featureId,
 				repositoryId: repo.id,
 				specPhase: "constitution",
 				createdByTeamMemberId,
+				specOutput: forceRegenerate ? { forceRegenerate: true } : undefined,
 			});
 
 			// Trigger queue processing
@@ -809,6 +963,7 @@ app.post(
 				phase: "constitution",
 				status: job.status,
 				message: "Spec-Kit started with constitution phase",
+				forceRegenerate: !!forceRegenerate,
 			});
 		} catch (err) {
 			console.error("Start spec error:", err);
@@ -823,7 +978,7 @@ app.post(
 	async (req: Request, res: Response) => {
 		try {
 			const featureId = getParam(req.params, "featureId");
-			const { phase, createdByTeamMemberId } = req.body;
+			const { phase, createdByTeamMemberId } = req.body ?? {};
 
 			// Validate phase
 			if (!phase || !SPEC_PHASES[phase as SpecPhase]) {
@@ -940,7 +1095,7 @@ app.post(
 		try {
 			const featureId = getParam(req.params, "featureId");
 			const clarificationId = getParam(req.params, "clarificationId");
-			const { response } = req.body;
+			const { response } = req.body ?? {};
 
 			if (!response) {
 				return res.status(400).json({ error: "response is required" });
@@ -964,6 +1119,63 @@ app.post(
 			});
 		} catch (err) {
 			console.error("Submit clarification error:", err);
+			res
+				.status((err as Error).message.includes("not found") ? 404 : 500)
+				.json({
+					error: (err as Error).message,
+				});
+		}
+	},
+);
+
+// Update spec output section
+app.put(
+	"/features/:featureId/spec/output",
+	async (req: Request, res: Response) => {
+		try {
+			const featureId = getParam(req.params, "featureId");
+			const { section, value } = req.body ?? {};
+
+			if (!section) {
+				return res.status(400).json({ error: "section is required" });
+			}
+			if (value === undefined) {
+				return res.status(400).json({ error: "value is required" });
+			}
+
+			// Get current spec output
+			const currentOutput = await getFeatureSpecOutput(featureId);
+			if (!currentOutput) {
+				return res
+					.status(404)
+					.json({ error: "Feature has no spec output yet" });
+			}
+
+			// Parse value if it's a JSON string for non-string sections
+			let parsedValue = value;
+			if (section !== "constitution" && typeof value === "string") {
+				try {
+					parsedValue = JSON.parse(value);
+				} catch {
+					// Keep as string if not valid JSON
+				}
+			}
+
+			// Update the specific section
+			const updatedOutput = {
+				...currentOutput,
+				[section]: parsedValue,
+			};
+
+			await updateFeatureSpecOutput(featureId, updatedOutput);
+
+			res.json({
+				success: true,
+				section,
+				message: `${section} updated successfully`,
+			});
+		} catch (err) {
+			console.error("Update spec output error:", err);
 			res
 				.status((err as Error).message.includes("not found") ? 404 : 500)
 				.json({
@@ -1068,7 +1280,7 @@ app.post("/memory/learn", async (req: Request, res: Response) => {
 			contextKeywords,
 			sourceJobId,
 			sourcePhase,
-		} = req.body;
+		} = req.body ?? {};
 
 		if (!memoryType || !scope || !key || !value) {
 			return res
@@ -1107,7 +1319,7 @@ app.get("/skills", async (_req: Request, res: Response) => {
 // Detect relevant skills for a description
 app.post("/skills/detect", async (req: Request, res: Response) => {
 	try {
-		const { description } = req.body;
+		const { description } = req.body ?? {};
 
 		if (!description) {
 			return res.status(400).json({ error: "description is required" });
@@ -1124,7 +1336,7 @@ app.post("/skills/detect", async (req: Request, res: Response) => {
 app.post("/skills/:skillName/run", async (req: Request, res: Response) => {
 	try {
 		const skillName = getParam(req.params, "skillName");
-		const { jobId, cwd, params } = req.body;
+		const { jobId, cwd, params } = req.body ?? {};
 
 		if (!jobId || !cwd) {
 			return res.status(400).json({ error: "jobId and cwd are required" });
@@ -1191,7 +1403,7 @@ app.get("/agents", async (_req: Request, res: Response) => {
 // Run a conductor workflow
 app.post("/agents/conductor", async (req: Request, res: Response) => {
 	try {
-		const { jobId, cwd, task, context } = req.body;
+		const { jobId, cwd, task, context } = req.body ?? {};
 
 		if (!jobId || !cwd || !task) {
 			return res
@@ -1209,7 +1421,7 @@ app.post("/agents/conductor", async (req: Request, res: Response) => {
 // Run agents in parallel
 app.post("/agents/parallel", async (req: Request, res: Response) => {
 	try {
-		const { tasks, cwd, jobId } = req.body;
+		const { tasks, cwd, jobId } = req.body ?? {};
 
 		if (!tasks || !Array.isArray(tasks) || !cwd || !jobId) {
 			return res
@@ -1239,7 +1451,7 @@ app.get("/scheduling/capacity", async (_req: Request, res: Response) => {
 // Predict tokens for a job
 app.post("/scheduling/predict", async (req: Request, res: Response) => {
 	try {
-		const { jobId, description, filesToModify, techStack } = req.body;
+		const { jobId, description, filesToModify, techStack } = req.body ?? {};
 
 		if (!description) {
 			return res.status(400).json({ error: "description is required" });

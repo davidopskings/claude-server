@@ -10,6 +10,7 @@ import {
 	runPrdGenerationJob,
 	runRalphJob,
 	runRalphPrdJob,
+	runRalphSpecJob,
 } from "./runner.js";
 import { cancelSpecJob, runSpecJob } from "./spec/runner.js";
 
@@ -37,9 +38,18 @@ export async function processQueue(): Promise<void> {
 		for (const job of jobsToRun) {
 			runningCount++;
 			// Choose runner based on job type and mode
+			// Ralph modes: prd_mode → runRalphPrdJob, spec_mode → runRalphSpecJob, neither → runRalphJob
 			let runner: (jobId: string) => Promise<void> = runJob;
 			if (job.job_type === "ralph") {
-				runner = job.prd_mode ? runRalphPrdJob : runRalphJob;
+				// Check spec_output for specMode flag (set by API when creating spec-mode Ralph job)
+				const specOutput = job.spec_output as { specMode?: boolean } | null;
+				if (specOutput?.specMode) {
+					runner = runRalphSpecJob;
+				} else if (job.prd_mode) {
+					runner = runRalphPrdJob;
+				} else {
+					runner = runRalphJob;
+				}
 			} else if (job.job_type === "prd_generation") {
 				runner = runPrdGenerationJob;
 			} else if (job.job_type === "spec") {

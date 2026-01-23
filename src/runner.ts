@@ -44,6 +44,7 @@ import {
 	recordActualUsage,
 	type TokenPrediction,
 } from "./scheduling/index.js";
+import type { Json } from "./types/supabase.js";
 
 // Workflow stage ID for "Ready for Review" (after Ralph completes)
 const WORKFLOW_STAGE_READY_FOR_REVIEW = "9bbe1c1a-cd24-44b4-98b3-2f769a4d2853";
@@ -2049,6 +2050,667 @@ ${feedbackLines}
 ---
 `;
 	appendFileSync(progressPath, content);
+}
+
+// ===== Spec-Kit Ralph Job Runner =====
+
+import type { SpecOutput } from "./db/types.js";
+
+const SPEC_PROGRESS_FILE = ".spec-progress.md";
+const SPEC_TASKS_FILE = ".spec-tasks.json";
+
+export async function runRalphSpecJob(jobId: string): Promise<void> {
+	const job = await getJob(jobId);
+	if (!job) throw new Error(`Job not found: ${jobId}`);
+
+	// Get repository info
+	let repo: CodeRepository | null = null;
+	if (job.repository_id) {
+		repo = await getRepositoryById(job.repository_id);
+	} else {
+		repo = await getRepositoryByClientId(job.client_id);
+	}
+
+	if (!repo) {
+		await updateJob(jobId, {
+			status: "failed",
+			error:
+				"No repository found for client. Add one to code_repositories first.",
+			completed_at: new Date().toISOString(),
+		});
+		return;
+	}
+
+	// Update job with repository_id if it wasn't set
+	if (!job.repository_id) {
+		await updateJob(jobId, { repository_id: repo.id });
+	}
+
+	const maxIterations = job.max_iterations || 20;
+	const specOutput = job.spec_output as unknown as SpecOutput;
+
+	if (!specOutput || !specOutput.tasks || specOutput.tasks.length === 0) {
+		await updateJob(jobId, {
+			status: "failed",
+			error: "No spec-kit tasks found. Run spec-kit pipeline first.",
+			completed_at: new Date().toISOString(),
+		});
+		return;
+	}
+
+	// Track task completion state
+	const completedTaskIds: number[] = [];
+	let worktreePath: string | null = null;
+
+	try {
+		// Update status to running
+		await updateJob(jobId, {
+			status: "running",
+			started_at: new Date().toISOString(),
+			current_iteration: 0,
+		});
+
+		await addJobMessage(
+			jobId,
+			"system",
+			`Starting Spec-Kit Ralph job for ${repo.owner_name}/${repo.repo_name}`,
+		);
+		await addJobMessage(
+			jobId,
+			"system",
+			`Tasks: ${specOutput.tasks.length} | Max iterations: ${maxIterations}`,
+		);
+
+		// 1. Setup git
+		await addJobMessage(jobId, "system", "Ensuring bare repository exists...");
+		await ensureBareRepo(repo);
+
+		await addJobMessage(jobId, "system", "Fetching latest from origin...");
+		await fetchOrigin(repo);
+
+		await addJobMessage(
+			jobId,
+			"system",
+			`Creating worktree: ${job.branch_name}`,
+		);
+		worktreePath = await createWorktree(repo, job);
+		await updateJob(jobId, { worktree_path: worktreePath });
+
+		// 2. Initialize spec progress files
+		const existingTasks = readSpecTasksFile(worktreePath);
+		if (existingTasks) {
+			// Resume from existing state
+			for (const task of existingTasks) {
+				if (task.completed) {
+					completedTaskIds.push(task.id);
+				}
+			}
+			await addJobMessage(
+				jobId,
+				"system",
+				`Found existing progress: ${completedTaskIds.length}/${specOutput.tasks.length} tasks complete`,
+			);
+		} else {
+			// Fresh start
+			initSpecProgressFile(worktreePath, job.id, job.branch_name, specOutput);
+			writeSpecTasksFile(worktreePath, specOutput.tasks);
+		}
+
+		// 3. Iteration loop
+		let completionReason: RalphCompletionReason | null = null;
+		let finalIteration = 0;
+
+		for (let i = 1; i <= maxIterations; i++) {
+			finalIteration = i;
+
+			// Check for manual stop request
+			const currentJob = await getJob(jobId);
+			if (currentJob?.status === "cancelled") {
+				completionReason = "manual_stop";
+				await addJobMessage(
+					jobId,
+					"system",
+					`Job was cancelled at iteration ${i}`,
+				);
+				break;
+			}
+
+			// Get next task (respecting dependencies)
+			const nextTask = getNextSpecTask(specOutput.tasks, completedTaskIds);
+			if (!nextTask) {
+				completionReason = "all_stories_complete";
+				await addJobMessage(
+					jobId,
+					"system",
+					"\n✓ All spec-kit tasks complete!",
+				);
+				break;
+			}
+
+			await updateJob(jobId, { current_iteration: i });
+			await addJobMessage(
+				jobId,
+				"system",
+				`\n========== ITERATION ${i}/${maxIterations} ==========`,
+			);
+			await addJobMessage(
+				jobId,
+				"system",
+				`Working on Task #${nextTask.id}: ${nextTask.title}`,
+			);
+
+			// Create iteration record
+			const iteration = await createIteration(jobId, i);
+
+			// Build spec-kit iteration prompt with FULL context
+			const iterationPrompt = buildSpecIterationPrompt(
+				job.prompt,
+				specOutput,
+				nextTask,
+				completedTaskIds,
+				i,
+				maxIterations,
+				job.branch_name,
+				job.feature_id || undefined,
+			);
+
+			// Run Claude for this iteration
+			let result = await runClaudeIteration(
+				iterationPrompt,
+				worktreePath,
+				jobId,
+				iteration.id,
+				`<task-complete>${nextTask.id}</task-complete>`,
+			);
+
+			// Retry once on crash
+			if (result.exitCode !== 0 && !result.promiseDetected) {
+				await addJobMessage(
+					jobId,
+					"system",
+					`Iteration crashed (exit code ${result.exitCode}), retrying...`,
+				);
+				result = await runClaudeIteration(
+					iterationPrompt,
+					worktreePath,
+					jobId,
+					iteration.id,
+					`<task-complete>${nextTask.id}</task-complete>`,
+				);
+			}
+
+			// Check for iteration failure (after retry)
+			if (result.exitCode !== 0) {
+				completionReason = "iteration_error";
+				await addJobMessage(
+					jobId,
+					"system",
+					`Iteration ${i} failed after retry with exit code ${result.exitCode}`,
+				);
+
+				await updateIteration(iteration.id, {
+					completed_at: new Date().toISOString(),
+					exit_code: result.exitCode,
+					error: result.error,
+					prompt_used: iterationPrompt,
+					promise_detected: false,
+					output_summary: result.summary,
+				});
+				break;
+			}
+
+			// Check if task was completed
+			if (result.promiseDetected) {
+				completedTaskIds.push(nextTask.id);
+				await addJobMessage(
+					jobId,
+					"system",
+					`✓ Task #${nextTask.id} completed`,
+				);
+
+				// Update spec-tasks.json
+				updateSpecTasksFile(worktreePath, nextTask.id);
+
+				// Update spec_output in database with ALL completed tasks
+				// This ensures previously completed tasks are also marked
+				for (const taskId of completedTaskIds) {
+					const task = specOutput.tasks.find((t) => t.id === taskId);
+					if (task) task.completed = true;
+				}
+				await updateJob(jobId, {
+					spec_output: specOutput as unknown as Json,
+				});
+
+				// Try to find the commit
+				let commitSha: string | null = null;
+				try {
+					const { stdout } = await execAsync(
+						`git log --oneline -1 --grep="task-${nextTask.id}" --format="%H"`,
+						{ cwd: worktreePath },
+					);
+					commitSha = stdout.trim() || null;
+				} catch {
+					// No commit found
+				}
+
+				if (commitSha) {
+					await updateIteration(iteration.id, {
+						commit_sha: commitSha,
+						story_id: nextTask.id,
+					});
+					await addJobMessage(
+						jobId,
+						"system",
+						`Commit: ${commitSha.substring(0, 7)}`,
+					);
+				}
+			}
+
+			// Update iteration record
+			await updateIteration(iteration.id, {
+				completed_at: new Date().toISOString(),
+				exit_code: result.exitCode,
+				prompt_used: iterationPrompt,
+				promise_detected: result.promiseDetected,
+				output_summary: result.summary,
+			});
+
+			// Append to progress file
+			appendSpecIterationToProgress(
+				worktreePath,
+				i,
+				result.summary,
+				result.promiseDetected ? nextTask : null,
+			);
+
+			// Push after each completed task to save progress
+			if (result.promiseDetected) {
+				try {
+					pushBranch(worktreePath, job.branch_name);
+					await addJobMessage(
+						jobId,
+						"system",
+						`Pushed to origin/${job.branch_name}`,
+					);
+				} catch (err) {
+					await addJobMessage(
+						jobId,
+						"system",
+						`Warning: Failed to push: ${err}`,
+					);
+				}
+			}
+
+			await addJobMessage(
+				jobId,
+				"system",
+				`Iteration ${i} complete. Tasks: ${completedTaskIds.length}/${specOutput.tasks.length}`,
+			);
+		}
+
+		// Reached max iterations
+		if (!completionReason) {
+			completionReason = "max_iterations";
+			await addJobMessage(
+				jobId,
+				"system",
+				`\nReached maximum iterations (${maxIterations}) without completing all tasks.`,
+			);
+		}
+
+		// 4. Post-loop: Create PR
+		await addJobMessage(jobId, "system", "\n========== CREATING PR ==========");
+
+		if (completedTaskIds.length > 0) {
+			const branchRecord = await createCodeBranch({
+				repositoryId: repo.id,
+				featureId: job.feature_id || undefined,
+				name: job.branch_name,
+				url: `https://github.com/${repo.owner_name}/${repo.repo_name}/tree/${job.branch_name}`,
+			});
+
+			const pr = await createPullRequest(repo, job, worktreePath);
+
+			const prRecord = await createCodePullRequest({
+				repositoryId: repo.id,
+				featureId: job.feature_id || undefined,
+				branchId: branchRecord.id,
+				number: pr.number,
+				title: pr.title,
+				status: "open",
+				url: pr.url,
+			});
+
+			await updateJob(jobId, {
+				status: "completed",
+				completed_at: new Date().toISOString(),
+				exit_code: 0,
+				pr_url: pr.url,
+				pr_number: pr.number,
+				files_changed: pr.filesChanged,
+				code_branch_id: branchRecord.id,
+				code_pull_request_id: prRecord.id,
+				total_iterations: finalIteration,
+				completion_reason: completionReason,
+			});
+
+			await addJobMessage(
+				jobId,
+				"system",
+				`\nSpec-Kit job completed after ${finalIteration} iterations!`,
+			);
+			await addJobMessage(
+				jobId,
+				"system",
+				`Completion reason: ${completionReason}`,
+			);
+			await addJobMessage(
+				jobId,
+				"system",
+				`Tasks completed: ${completedTaskIds.length}/${specOutput.tasks.length}`,
+			);
+			await addJobMessage(jobId, "system", `PR: ${pr.url}`);
+
+			// Update feature workflow stage
+			if (job.feature_id) {
+				try {
+					await updateFeatureWorkflowStage(
+						job.feature_id,
+						WORKFLOW_STAGE_READY_FOR_REVIEW,
+					);
+					await addJobMessage(
+						jobId,
+						"system",
+						`Updated feature workflow stage to "Ready for Review"`,
+					);
+				} catch (err) {
+					await addJobMessage(
+						jobId,
+						"system",
+						`Warning: Failed to update feature workflow stage: ${err}`,
+					);
+				}
+			}
+		} else {
+			await updateJob(jobId, {
+				status: "completed",
+				completed_at: new Date().toISOString(),
+				exit_code: 0,
+				error: "No tasks were completed",
+				total_iterations: finalIteration,
+				completion_reason: completionReason,
+			});
+
+			await addJobMessage(
+				jobId,
+				"system",
+				`\nSpec-Kit job completed after ${finalIteration} iterations but no tasks were completed.`,
+			);
+		}
+	} catch (err) {
+		console.error(`Spec-Kit job ${jobId} failed:`, err);
+
+		await updateJob(jobId, {
+			status: "failed",
+			completed_at: new Date().toISOString(),
+			error: (err as Error).message || String(err),
+			completion_reason: "iteration_error",
+		});
+
+		await addJobMessage(
+			jobId,
+			"system",
+			`Spec-Kit job failed: ${(err as Error).message}`,
+		);
+	}
+}
+
+// Get next task that has all dependencies completed
+type SpecTask = NonNullable<SpecOutput["tasks"]>[number];
+
+function getNextSpecTask(
+	tasks: SpecOutput["tasks"],
+	completedIds: number[],
+): SpecTask | null {
+	if (!tasks) return null;
+	return (
+		tasks.find(
+			(t) =>
+				!completedIds.includes(t.id) &&
+				t.dependencies.every((d) => completedIds.includes(d)),
+		) || null
+	);
+}
+
+// Initialize spec progress file
+function initSpecProgressFile(
+	worktreePath: string,
+	jobId: string,
+	branchName: string,
+	specOutput: SpecOutput,
+): void {
+	const progressPath = join(worktreePath, SPEC_PROGRESS_FILE);
+	const content = `# Spec-Kit Progress
+
+Job ID: ${jobId}
+Branch: ${branchName}
+Started: ${new Date().toISOString()}
+
+## Constitution Summary
+${specOutput.constitution?.substring(0, 500) || "N/A"}...
+
+## Tasks Overview
+${specOutput.tasks?.map((t) => `- [ ] #${t.id}: ${t.title}`).join("\n") || "N/A"}
+
+## Codebase Patterns
+(Discovered patterns will be added here)
+
+---
+
+`;
+	writeFileSync(progressPath, content);
+}
+
+// Spec tasks JSON file for tracking completion
+interface SpecTaskState {
+	id: number;
+	title: string;
+	completed: boolean;
+}
+
+function writeSpecTasksFile(
+	worktreePath: string,
+	tasks: NonNullable<SpecOutput["tasks"]>,
+): void {
+	const tasksPath = join(worktreePath, SPEC_TASKS_FILE);
+	const state: SpecTaskState[] = tasks.map((t) => ({
+		id: t.id,
+		title: t.title,
+		completed: false,
+	}));
+	writeFileSync(tasksPath, JSON.stringify(state, null, 2));
+}
+
+function readSpecTasksFile(worktreePath: string): SpecTaskState[] | null {
+	const tasksPath = join(worktreePath, SPEC_TASKS_FILE);
+	if (!existsSync(tasksPath)) return null;
+	try {
+		const content = readFileSync(tasksPath, "utf8");
+		return JSON.parse(content) as SpecTaskState[];
+	} catch {
+		return null;
+	}
+}
+
+function updateSpecTasksFile(worktreePath: string, taskId: number): void {
+	const tasks = readSpecTasksFile(worktreePath);
+	if (!tasks) return;
+	const task = tasks.find((t) => t.id === taskId);
+	if (task) task.completed = true;
+	writeFileSync(
+		join(worktreePath, SPEC_TASKS_FILE),
+		JSON.stringify(tasks, null, 2),
+	);
+}
+
+function appendSpecIterationToProgress(
+	worktreePath: string,
+	iteration: number,
+	summary: string,
+	completedTask: SpecTask | null,
+): void {
+	const progressPath = join(worktreePath, SPEC_PROGRESS_FILE);
+
+	const taskLine = completedTask
+		? `### Completed Task\n- ✓ #${completedTask.id}: ${completedTask.title}\n`
+		: "";
+
+	const content = `
+## Iteration ${iteration}
+Completed: ${new Date().toISOString()}
+${taskLine}
+### Summary
+${summary || "No summary provided."}
+
+---
+`;
+	appendFileSync(progressPath, content);
+}
+
+function buildSpecIterationPrompt(
+	basePrompt: string,
+	specOutput: SpecOutput,
+	currentTask: NonNullable<SpecOutput["tasks"]>[number],
+	completedTaskIds: number[],
+	iteration: number,
+	maxIterations: number,
+	branchName: string,
+	featureId?: string,
+): string {
+	// Format clarifications with responses
+	const clarificationsSection =
+		specOutput.clarifications
+			?.filter((c) => c.response)
+			.map((c) => `Q: ${c.question}\nA: ${c.response}`)
+			.join("\n\n") || "None";
+
+	// Format all tasks with status
+	const tasksOverview =
+		specOutput.tasks
+			?.map((t) => {
+				const status = completedTaskIds.includes(t.id)
+					? "✓"
+					: t.id === currentTask.id
+						? "→"
+						: "○";
+				const deps =
+					t.dependencies.length > 0
+						? ` (depends on: ${t.dependencies.join(", ")})`
+						: "";
+				return `${status} #${t.id}: ${t.title}${deps}`;
+			})
+			.join("\n") || "N/A";
+
+	// Format existing patterns from analysis
+	const existingPatterns =
+		specOutput.analysis?.existingPatterns?.join("\n- ") || "None identified";
+
+	return `# Spec-Kit Implementation Agent
+
+## Context
+- Iteration: ${iteration} of ${maxIterations}
+- Branch: ${branchName}
+- Feature ID: ${featureId || "N/A"}
+
+## Coding Standards (Constitution)
+${specOutput.constitution || "Not available"}
+
+---
+
+## Feature Specification
+
+### Overview
+${specOutput.spec?.overview || basePrompt}
+
+### Requirements
+${specOutput.spec?.requirements?.map((r) => `- ${r}`).join("\n") || "N/A"}
+
+### Acceptance Criteria
+${specOutput.spec?.acceptanceCriteria?.map((c) => `- ${c}`).join("\n") || "N/A"}
+
+### Out of Scope
+${specOutput.spec?.outOfScope?.map((o) => `- ${o}`).join("\n") || "N/A"}
+
+---
+
+## Clarifications Answered
+${clarificationsSection}
+
+---
+
+## Architecture Plan
+
+### Architecture
+${specOutput.plan?.architecture || "N/A"}
+
+### Technical Decisions
+${specOutput.plan?.techDecisions?.map((d) => `- ${d}`).join("\n") || "N/A"}
+
+### File Structure
+${specOutput.plan?.fileStructure?.map((f) => `- ${f}`).join("\n") || "N/A"}
+
+---
+
+## Existing Patterns to Follow
+- ${existingPatterns}
+
+---
+
+## Tasks Overview
+${tasksOverview}
+
+---
+
+## CURRENT TASK
+
+**Task #${currentTask.id}: ${currentTask.title}**
+
+${currentTask.description}
+
+**Files to modify:**
+${currentTask.files.map((f) => `- ${f}`).join("\n")}
+
+**Dependencies:** ${currentTask.dependencies.length > 0 ? currentTask.dependencies.map((d) => `#${d}`).join(", ") : "None"} (all completed ✓)
+
+---
+
+## Your Instructions
+
+1. Implement ONLY Task #${currentTask.id}
+2. Follow the constitution coding standards
+3. Follow the architecture plan and technical decisions
+4. Run quality checks (typecheck, lint, test)
+5. Commit with message: \`feat(spec-${featureId || "task"}): task-${currentTask.id} - ${currentTask.title}\`
+6. When the task is complete and committed, output: \`<task-complete>${currentTask.id}</task-complete>\`
+
+## Progress Files
+- Read \`.spec-progress.md\` for iteration history
+- Read \`.spec-tasks.json\` for task completion state
+- Update progress.md with your learnings after completing the task
+
+## Quality Requirements
+- ALL commits must pass typecheck, lint, and tests
+- Follow existing code patterns from the constitution
+- Keep changes focused to the current task only
+
+## Stop Condition
+After completing Task #${currentTask.id}:
+1. Commit your changes
+2. Output \`<task-complete>${currentTask.id}</task-complete>\`
+3. Do NOT start the next task - the orchestrator will handle that
+
+**CRITICAL: One task per iteration. Stop after completing Task #${currentTask.id}.**
+`;
 }
 
 // ===== Standard Job Runner =====

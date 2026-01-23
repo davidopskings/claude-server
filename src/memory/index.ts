@@ -297,9 +297,21 @@ async function markAccessed(ids: string[]): Promise<void> {
 /**
  * Extract keywords from a query string
  */
-function extractKeywords(query: string): string[] {
+function extractKeywords(query: unknown): string[] {
+	// Handle non-string input
+	let queryStr: string;
+	if (typeof query !== "string") {
+		if (query && typeof query === "object") {
+			// Try to stringify object and extract from that
+			queryStr = JSON.stringify(query);
+		} else {
+			return [];
+		}
+	} else {
+		queryStr = query;
+	}
 	// Simple keyword extraction - split, lowercase, filter short words
-	return query
+	return queryStr
 		.toLowerCase()
 		.replace(/[^a-z0-9\s]/g, " ")
 		.split(/\s+/)
