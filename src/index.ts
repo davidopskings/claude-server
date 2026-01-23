@@ -683,37 +683,37 @@ app.post("/jobs/:id/retry", async (req: Request, res: Response) => {
 });
 
 // Generate PRD for a feature (async job)
-app.post('/jobs/generate-prd', async (req: Request, res: Response) => {
-  try {
-    const { featureId, clientId } = req.body;
+app.post("/jobs/generate-prd", async (req: Request, res: Response) => {
+	try {
+		const { featureId, clientId } = req.body;
 
-    if (!featureId) {
-      return res.status(400).json({ error: 'featureId required' });
-    }
+		if (!featureId) {
+			return res.status(400).json({ error: "featureId required" });
+		}
 
-    if (!clientId) {
-      return res.status(400).json({ error: 'clientId required' });
-    }
+		if (!clientId) {
+			return res.status(400).json({ error: "clientId required" });
+		}
 
-    const job = await createJob({
-      clientId,
-      featureId,
-      jobType: 'prd_generation',
-      branchName: `prd-gen-${Date.now()}`,
-      prompt: '',
-      title: 'Generate PRD'
-    });
+		const job = await createJob({
+			clientId,
+			featureId,
+			jobType: "prd_generation",
+			branchName: `prd-gen-${Date.now()}`,
+			prompt: "",
+			title: "Generate PRD",
+		});
 
-    processQueue();
+		processQueue();
 
-    res.status(201).json({
-      id: job.id,
-      status: job.status,
-      featureId
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
+		res.status(201).json({
+			id: job.id,
+			status: job.status,
+			featureId,
+		});
+	} catch (err) {
+		res.status(500).json({ error: (err as Error).message });
+	}
 });
 
 // Send a message to an interactive task job (when Claude asks a question)

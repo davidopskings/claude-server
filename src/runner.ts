@@ -1517,20 +1517,20 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 
 // PRD structure based on ai-dev-tasks pattern
 interface GeneratedPrd {
-  title: string;
-  overview: string;
-  goals: string[];
-  userStories: string[];
-  functionalRequirements: string[];
-  nonGoals: string[];
-  technicalConsiderations: string[];
-  successMetrics: string[];
+	title: string;
+	overview: string;
+	goals: string[];
+	userStories: string[];
+	functionalRequirements: string[];
+	nonGoals: string[];
+	technicalConsiderations: string[];
+	successMetrics: string[];
 }
 
 interface GeneratedTask {
-  title: string;
-  description: string;
-  orderIndex: number;
+	title: string;
+	description: string;
+	orderIndex: number;
 }
 
 // Prompts for PRD generation
@@ -1593,196 +1593,228 @@ PRD:
 `;
 
 function extractJsonFromResponse(text: string): string {
-  let jsonStr = text.trim();
+	const jsonStr = text.trim();
 
-  // First, try to find JSON within markdown code blocks anywhere in the text
-  const jsonBlockMatch = jsonStr.match(/```json\s*([\s\S]*?)```/);
-  if (jsonBlockMatch) {
-    return jsonBlockMatch[1].trim();
-  }
+	// First, try to find JSON within markdown code blocks anywhere in the text
+	const jsonBlockMatch = jsonStr.match(/```json\s*([\s\S]*?)```/);
+	if (jsonBlockMatch) {
+		return jsonBlockMatch[1].trim();
+	}
 
-  // Try generic code block
-  const codeBlockMatch = jsonStr.match(/```\s*([\s\S]*?)```/);
-  if (codeBlockMatch) {
-    return codeBlockMatch[1].trim();
-  }
+	// Try generic code block
+	const codeBlockMatch = jsonStr.match(/```\s*([\s\S]*?)```/);
+	if (codeBlockMatch) {
+		return codeBlockMatch[1].trim();
+	}
 
-  // Try to find raw JSON object or array (starts with { or [)
-  const jsonObjectMatch = jsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  if (jsonObjectMatch) {
-    return jsonObjectMatch[1].trim();
-  }
+	// Try to find raw JSON object or array (starts with { or [)
+	const jsonObjectMatch = jsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+	if (jsonObjectMatch) {
+		return jsonObjectMatch[1].trim();
+	}
 
-  return jsonStr.trim();
+	return jsonStr.trim();
 }
 
 function buildFeatureContext(feature: FeatureWithClient): string {
-  const parts: string[] = [];
+	const parts: string[] = [];
 
-  parts.push(`Title: ${feature.title}`);
+	parts.push(`Title: ${feature.title}`);
 
-  if (feature.client?.name) {
-    parts.push(`Client: ${feature.client.name}`);
-  }
+	if (feature.client?.name) {
+		parts.push(`Client: ${feature.client.name}`);
+	}
 
-  if (feature.functionality_notes) {
-    parts.push(`\nFunctionality Notes:\n${feature.functionality_notes}`);
-  }
+	if (feature.functionality_notes) {
+		parts.push(`\nFunctionality Notes:\n${feature.functionality_notes}`);
+	}
 
-  if (feature.client_context) {
-    parts.push(`\nClient Context:\n${feature.client_context}`);
-  }
+	if (feature.client_context) {
+		parts.push(`\nClient Context:\n${feature.client_context}`);
+	}
 
-  return parts.join('\n');
+	return parts.join("\n");
 }
 
 async function runClaudeForPrdGeneration(
-  prompt: string,
-  jobId: string
+	prompt: string,
+	jobId: string,
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let output = '';
-    let errorOutput = '';
+	return new Promise((resolve, reject) => {
+		let output = "";
+		let errorOutput = "";
 
-    const proc = spawn(CLAUDE_BIN, [
-      '--print',
-      '--dangerously-skip-permissions',
-      '--output-format', 'text',
-      prompt
-    ], {
-      cwd: process.cwd(),
-      env: { ...process.env, HOME: HOME_DIR },
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
+		const proc = spawn(
+			CLAUDE_BIN,
+			[
+				"--print",
+				"--dangerously-skip-permissions",
+				"--output-format",
+				"text",
+				prompt,
+			],
+			{
+				cwd: process.cwd(),
+				env: { ...process.env, HOME: HOME_DIR },
+				stdio: ["ignore", "pipe", "pipe"],
+			},
+		);
 
-    runningProcesses.set(jobId, proc);
+		runningProcesses.set(jobId, proc);
 
-    proc.stdout.on('data', (data: Buffer) => {
-      output += data.toString();
-    });
+		proc.stdout.on("data", (data: Buffer) => {
+			output += data.toString();
+		});
 
-    proc.stderr.on('data', (data: Buffer) => {
-      errorOutput += data.toString();
-    });
+		proc.stderr.on("data", (data: Buffer) => {
+			errorOutput += data.toString();
+		});
 
-    proc.on('close', (code: number | null) => {
-      runningProcesses.delete(jobId);
-      if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
-      } else {
-        resolve(output.trim());
-      }
-    });
+		proc.on("close", (code: number | null) => {
+			runningProcesses.delete(jobId);
+			if (code !== 0) {
+				reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
+			} else {
+				resolve(output.trim());
+			}
+		});
 
-    proc.on('error', (err: Error) => {
-      runningProcesses.delete(jobId);
-      reject(err);
-    });
-  });
+		proc.on("error", (err: Error) => {
+			runningProcesses.delete(jobId);
+			reject(err);
+		});
+	});
 }
 
 export async function runPrdGenerationJob(jobId: string): Promise<void> {
-  const job = await getJob(jobId);
-  if (!job) throw new Error(`Job not found: ${jobId}`);
+	const job = await getJob(jobId);
+	if (!job) throw new Error(`Job not found: ${jobId}`);
 
-  const featureId = job.feature_id;
-  if (!featureId) {
-    await updateJob(jobId, {
-      status: 'failed',
-      error: 'No feature_id provided for PRD generation job',
-      completed_at: new Date().toISOString()
-    });
-    return;
-  }
+	const featureId = job.feature_id;
+	if (!featureId) {
+		await updateJob(jobId, {
+			status: "failed",
+			error: "No feature_id provided for PRD generation job",
+			completed_at: new Date().toISOString(),
+		});
+		return;
+	}
 
-  try {
-    // Update status to running
-    await updateJob(jobId, {
-      status: 'running',
-      started_at: new Date().toISOString()
-    });
+	try {
+		// Update status to running
+		await updateJob(jobId, {
+			status: "running",
+			started_at: new Date().toISOString(),
+		});
 
-    // 1. Get feature from database
-    const feature = await getFeature(featureId);
-    if (!feature) {
-      throw new Error(`Feature not found: ${featureId}`);
-    }
+		// 1. Get feature from database
+		const feature = await getFeature(featureId);
+		if (!feature) {
+			throw new Error(`Feature not found: ${featureId}`);
+		}
 
-    const featureContext = buildFeatureContext(feature);
-    await addJobMessage(jobId, 'system', `Generating PRD for feature: ${feature.title}`);
+		const featureContext = buildFeatureContext(feature);
+		await addJobMessage(
+			jobId,
+			"system",
+			`Generating PRD for feature: ${feature.title}`,
+		);
 
-    // 2. Generate PRD using Claude
-    const prdPrompt = PRD_PROMPT + featureContext;
-    await addJobMessage(jobId, 'system', 'Calling Claude for PRD generation...');
-    const prdResponse = await runClaudeForPrdGeneration(prdPrompt, jobId);
+		// 2. Generate PRD using Claude
+		const prdPrompt = PRD_PROMPT + featureContext;
+		await addJobMessage(
+			jobId,
+			"system",
+			"Calling Claude for PRD generation...",
+		);
+		const prdResponse = await runClaudeForPrdGeneration(prdPrompt, jobId);
 
-    let prd: GeneratedPrd;
-    try {
-      const jsonStr = extractJsonFromResponse(prdResponse);
-      prd = JSON.parse(jsonStr);
-    } catch (err) {
-      throw new Error(`Failed to parse PRD response as JSON: ${err}. Response was: ${prdResponse.slice(0, 500)}`);
-    }
+		let prd: GeneratedPrd;
+		try {
+			const jsonStr = extractJsonFromResponse(prdResponse);
+			prd = JSON.parse(jsonStr);
+		} catch (err) {
+			throw new Error(
+				`Failed to parse PRD response as JSON: ${err}. Response was: ${prdResponse.slice(0, 500)}`,
+			);
+		}
 
-    await addJobMessage(jobId, 'system', `PRD generated: "${prd.title}"`);
+		await addJobMessage(jobId, "system", `PRD generated: "${prd.title}"`);
 
-    // 3. Generate tasks using Claude
-    const tasksPrompt = TASKS_PROMPT + JSON.stringify(prd, null, 2);
-    await addJobMessage(jobId, 'system', 'Calling Claude for task generation...');
-    const tasksResponse = await runClaudeForPrdGeneration(tasksPrompt, jobId);
+		// 3. Generate tasks using Claude
+		const tasksPrompt = TASKS_PROMPT + JSON.stringify(prd, null, 2);
+		await addJobMessage(
+			jobId,
+			"system",
+			"Calling Claude for task generation...",
+		);
+		const tasksResponse = await runClaudeForPrdGeneration(tasksPrompt, jobId);
 
-    let tasks: GeneratedTask[];
-    try {
-      const jsonStr = extractJsonFromResponse(tasksResponse);
-      tasks = JSON.parse(jsonStr);
-    } catch (err) {
-      throw new Error(`Failed to parse tasks response as JSON: ${err}. Response was: ${tasksResponse.slice(0, 500)}`);
-    }
+		let tasks: GeneratedTask[];
+		try {
+			const jsonStr = extractJsonFromResponse(tasksResponse);
+			tasks = JSON.parse(jsonStr);
+		} catch (err) {
+			throw new Error(
+				`Failed to parse tasks response as JSON: ${err}. Response was: ${tasksResponse.slice(0, 500)}`,
+			);
+		}
 
-    await addJobMessage(jobId, 'system', `Generated ${tasks.length} tasks`);
+		await addJobMessage(jobId, "system", `Generated ${tasks.length} tasks`);
 
-    // 4. Clear existing todos (PRD generation always replaces)
-    const deleted = await deleteTodosByFeatureId(featureId);
-    if (deleted > 0) {
-      await addJobMessage(jobId, 'system', `Deleted ${deleted} existing todos`);
-    }
+		// 4. Clear existing todos (PRD generation always replaces)
+		const deleted = await deleteTodosByFeatureId(featureId);
+		if (deleted > 0) {
+			await addJobMessage(jobId, "system", `Deleted ${deleted} existing todos`);
+		}
 
-    // 5. Save PRD to feature record
-    await updateFeaturePrd(featureId, prd);
-    await addJobMessage(jobId, 'system', 'Saved PRD to feature record');
+		// 5. Save PRD to feature record
+		await updateFeaturePrd(featureId, prd);
+		await addJobMessage(jobId, "system", "Saved PRD to feature record");
 
-    // 6. Create todos in database
-    const todoInserts: TodoInsert[] = tasks.map(task => ({
-      feature_id: featureId,
-      title: task.title,
-      description: task.description,
-      status: 'pending',
-      order_index: task.orderIndex
-    }));
+		// 6. Create todos in database
+		const todoInserts: TodoInsert[] = tasks.map((task) => ({
+			feature_id: featureId,
+			title: task.title,
+			description: task.description,
+			status: "pending",
+			order_index: task.orderIndex,
+		}));
 
-    const createdTodos = await createTodos(todoInserts);
-    await addJobMessage(jobId, 'system', `Created ${createdTodos.length} todos`);
+		const createdTodos = await createTodos(todoInserts);
+		await addJobMessage(
+			jobId,
+			"system",
+			`Created ${createdTodos.length} todos`,
+		);
 
-    // 7. Mark job as completed
-    await updateJob(jobId, {
-      status: 'completed',
-      completed_at: new Date().toISOString(),
-      exit_code: 0
-    });
+		// 7. Mark job as completed
+		await updateJob(jobId, {
+			status: "completed",
+			completed_at: new Date().toISOString(),
+			exit_code: 0,
+		});
 
-    await addJobMessage(jobId, 'system', `PRD generation completed successfully!`);
+		await addJobMessage(
+			jobId,
+			"system",
+			"PRD generation completed successfully!",
+		);
+	} catch (err) {
+		console.error(`PRD generation job ${jobId} failed:`, err);
 
-  } catch (err: any) {
-    console.error(`PRD generation job ${jobId} failed:`, err);
+		await updateJob(jobId, {
+			status: "failed",
+			completed_at: new Date().toISOString(),
+			error: (err as Error).message || String(err),
+		});
 
-    await updateJob(jobId, {
-      status: 'failed',
-      completed_at: new Date().toISOString(),
-      error: err.message || String(err)
-    });
-
-    await addJobMessage(jobId, 'system', `PRD generation failed: ${err.message}`);
-  }
+		await addJobMessage(
+			jobId,
+			"system",
+			`PRD generation failed: ${(err as Error).message}`,
+		);
+	}
 }
 
 // Vercel deployment helper - supports multiple Vercel projects per client
