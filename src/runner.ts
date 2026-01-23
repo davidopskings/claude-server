@@ -1033,14 +1033,13 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
               `<p class="text-node"><strong>${d.projectName}</strong>: <a href="${d.url}" target="_blank">${d.url}</a></p>`
             ).join('');
 
-            await createComment({
-              parentType: 'feature',
-              parentId: job.feature_id,
-              body: commentBody
-            });
+          await createComment({
+            parentType: 'feature',
+            parentId: job.feature_id,
+            body: prLink + deploymentLinks
+          });
 
-            await addJobMessage(jobId, 'system', `Added deployment comment to feature with ${deployments.length} preview(s)`);
-          }
+          await addJobMessage(jobId, 'system', `Added comment to feature with PR link and ${deployments.length} preview(s)`);
         } catch (err: any) {
           await addJobMessage(jobId, 'system', `Vercel deployment failed: ${err.message}`);
           // Don't fail the job - deployment is optional
