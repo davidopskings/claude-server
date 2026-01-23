@@ -1027,11 +1027,11 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
             }
           }
 
-          // Add single comment with all deployment links
-          if (deployments.length > 0) {
-            const commentBody = deployments.map(d =>
-              `<p class="text-node"><strong>${d.projectName}</strong>: <a href="${d.url}" target="_blank">${d.url}</a></p>`
-            ).join('');
+          // Add comment with PR link and deployment links (if any)
+          const prLink = `<p class="text-node"><strong>Pull Request</strong>: <a href="${pr.url}" target="_blank">${pr.url}</a></p>`;
+          const deploymentLinks = deployments.map(d =>
+            `<p class="text-node"><strong>${d.projectName}</strong>: <a href="${d.url}" target="_blank">${d.url}</a></p>`
+          ).join('');
 
           await createComment({
             parentType: 'feature',
