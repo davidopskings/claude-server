@@ -921,3 +921,112 @@ export async function updateClientConstitution(
 
 	if (error) throw error;
 }
+
+// ----- Workflow Stage Management -----
+
+// Feature workflow ID (from OS migrations)
+const FEATURE_WORKFLOW_ID = "e787fde9-4d77-46ca-a032-33bd78c4bd91";
+
+// Spec-Kit phase stage codes (from 0013_spec_kit_ralph_workflow_stages.sql)
+export const SPEC_STAGE_CODES = {
+	// Constitution
+	constitution_running: "constitution_running", // 51
+	constitution_complete: "constitution_complete", // 52
+
+	// Specify
+	specify_running: "specify_running", // 55
+	specify_clarify: "specify_clarify", // 56
+	specify_dev_review: "specify_dev_review", // 58
+	specify_ba_review: "specify_ba_review", // 59
+	specify_complete: "specify_complete", // 60
+
+	// Clarify
+	clarify_running: "clarify_running", // 61
+	clarify_waiting: "clarify_waiting", // 62
+	clarify_complete: "clarify_complete", // 63
+
+	// Plan
+	plan_running: "plan_running", // 65
+	plan_clarify: "plan_clarify", // 66
+	plan_dev_review: "plan_dev_review", // 68
+	plan_ba_review: "plan_ba_review", // 69
+	plan_complete: "plan_complete", // 64
+
+	// Analyze
+	analyze_running: "analyze_running", // 71
+	analyze_failed: "analyze_failed", // 72
+	analyze_complete: "analyze_complete", // 73
+
+	// Improve
+	improve_running: "improve_running", // 75
+	improve_clarify: "improve_clarify", // 76
+	improve_complete: "improve_complete", // 77
+
+	// Tasks
+	tasks_running: "tasks_running", // 81
+	tasks_clarify: "tasks_clarify", // 82
+	tasks_complete: "tasks_complete", // 83
+
+	// Spec done
+	spec_complete: "spec_complete", // 84
+} as const;
+
+// Ralph stage codes
+export const RALPH_STAGE_CODES = {
+	ralph_running: "ralph_running", // 135
+	ralph_clarify: "ralph_clarify", // 136
+	ralph_dev_review: "ralph_dev_review", // 138
+	ralph_ba_review: "ralph_ba_review", // 139
+	ralph_complete: "ralph_complete", // 140
+} as const;
+
+export type SpecStageCode =
+	(typeof SPEC_STAGE_CODES)[keyof typeof SPEC_STAGE_CODES];
+export type RalphStageCode =
+	(typeof RALPH_STAGE_CODES)[keyof typeof RALPH_STAGE_CODES];
+
+// Cache for stage code → ID lookups
+const stageCodeCache = new Map<string, string>();
+
+// Look up workflow stage ID by code
+export async function getWorkflowStageByCode(
+	stageCode: string,
+): Promise<string | null> {
+	// Check cache first
+	const cached = stageCodeCache.get(stageCode);
+	if (cached) return cached;
+
+	const { data, error } = await supabase
+		.from("workflow_stages")
+		.select("id")
+		.eq("code", stageCode)
+		.eq("workflow_id", FEATURE_WORKFLOW_ID)
+		.single();
+
+	if (error && error.code !== "PGRST116") {
+		console.error(`Failed to lookup stage code ${stageCode}:`, error);
+		return null;
+	}
+
+	if (data?.id) {
+		stageCodeCache.set(stageCode, data.id);
+		return data.id;
+	}
+
+	return null;
+}
+
+// Update feature workflow stage by code (convenience wrapper)
+export async function updateFeatureWorkflowStageByCode(
+	featureId: string,
+	stageCode: string,
+): Promise<boolean> {
+	const stageId = await getWorkflowStageByCode(stageCode);
+	if (!stageId) {
+		console.error(`Stage code not found: ${stageCode}`);
+		return false;
+	}
+
+	await updateFeatureWorkflowStage(featureId, stageId);
+	return true;
+}

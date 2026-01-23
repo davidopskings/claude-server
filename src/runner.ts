@@ -22,10 +22,11 @@ import {
 	getJob,
 	getRepositoryByClientId,
 	getRepositoryById,
+	RALPH_STAGE_CODES,
 	syncTodosFromPrd,
 	type TodoInsert,
 	updateFeaturePrd,
-	updateFeatureWorkflowStage,
+	updateFeatureWorkflowStageByCode,
 	updateIteration,
 	updateJob,
 	updatePrdProgress,
@@ -46,8 +47,31 @@ import {
 } from "./scheduling/index.js";
 import type { Json } from "./types/supabase.js";
 
-// Workflow stage ID for "Ready for Review" (after Ralph completes)
-const WORKFLOW_STAGE_READY_FOR_REVIEW = "9bbe1c1a-cd24-44b4-98b3-2f769a4d2853";
+// Helper to update feature workflow stage with error handling
+async function setRalphFeatureStage(
+	featureId: string,
+	stageCode: string,
+	jobId: string,
+): Promise<void> {
+	try {
+		const success = await updateFeatureWorkflowStageByCode(
+			featureId,
+			stageCode,
+		);
+		if (success) {
+			await addJobMessage(
+				jobId,
+				"system",
+				`Updated workflow stage to: ${stageCode}`,
+			);
+		} else {
+			console.error(`Failed to update stage to ${stageCode} - stage not found`);
+		}
+	} catch (err) {
+		console.error("Error updating workflow stage:", err);
+		// Don't throw - stage update failure shouldn't fail the job
+	}
+}
 
 import type {
 	FeedbackResult,
@@ -353,6 +377,15 @@ export async function runRalphJob(jobId: string): Promise<void> {
 			started_at: new Date().toISOString(),
 			current_iteration: 0,
 		});
+
+		// Update workflow stage to ralph_running
+		if (job.feature_id) {
+			await setRalphFeatureStage(
+				job.feature_id,
+				RALPH_STAGE_CODES.ralph_running,
+				jobId,
+			);
+		}
 
 		addSpanEvent(trace, "ralph_started");
 		await addJobMessage(
@@ -938,6 +971,15 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 			current_iteration: 0,
 		});
 
+		// Update workflow stage to ralph_running
+		if (job.feature_id) {
+			await setRalphFeatureStage(
+				job.feature_id,
+				RALPH_STAGE_CODES.ralph_running,
+				jobId,
+			);
+		}
+
 		await addJobMessage(
 			jobId,
 			"system",
@@ -1373,25 +1415,13 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 			);
 			await addJobMessage(jobId, "system", `PR: ${pr.url}`);
 
-			// Update feature workflow stage to "Ready for Review"
+			// Update feature workflow stage to Ralph complete
 			if (job.feature_id) {
-				try {
-					await updateFeatureWorkflowStage(
-						job.feature_id,
-						WORKFLOW_STAGE_READY_FOR_REVIEW,
-					);
-					await addJobMessage(
-						jobId,
-						"system",
-						`Updated feature workflow stage to "Ready for Review"`,
-					);
-				} catch (err) {
-					await addJobMessage(
-						jobId,
-						"system",
-						`Warning: Failed to update feature workflow stage: ${err}`,
-					);
-				}
+				await setRalphFeatureStage(
+					job.feature_id,
+					RALPH_STAGE_CODES.ralph_complete,
+					jobId,
+				);
 			}
 
 			// Trigger Vercel preview deployments for all configured projects and add feature comment
@@ -2142,6 +2172,15 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 			current_iteration: 0,
 		});
 
+		// Update workflow stage to ralph_running
+		if (job.feature_id) {
+			await setRalphFeatureStage(
+				job.feature_id,
+				RALPH_STAGE_CODES.ralph_running,
+				jobId,
+			);
+		}
+
 		await addJobMessage(
 			jobId,
 			"system",
@@ -2443,25 +2482,13 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 			);
 			await addJobMessage(jobId, "system", `PR: ${pr.url}`);
 
-			// Update feature workflow stage
+			// Update feature workflow stage to Ralph complete
 			if (job.feature_id) {
-				try {
-					await updateFeatureWorkflowStage(
-						job.feature_id,
-						WORKFLOW_STAGE_READY_FOR_REVIEW,
-					);
-					await addJobMessage(
-						jobId,
-						"system",
-						`Updated feature workflow stage to "Ready for Review"`,
-					);
-				} catch (err) {
-					await addJobMessage(
-						jobId,
-						"system",
-						`Warning: Failed to update feature workflow stage: ${err}`,
-					);
-				}
+				await setRalphFeatureStage(
+					job.feature_id,
+					RALPH_STAGE_CODES.ralph_complete,
+					jobId,
+				);
 			}
 		} else {
 			await updateJob(jobId, {

@@ -5,7 +5,9 @@ import {
 	getFeature,
 	getFeatureSpecOutput,
 	getJob,
+	SPEC_STAGE_CODES,
 	updateFeatureSpecOutput,
+	updateFeatureWorkflowStageByCode,
 	updateJob,
 } from "../db/index.js";
 import {
@@ -43,6 +45,69 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || `${HOME_DIR}/.local/bin/claude`;
 
 // Track running processes for cancellation
 const runningProcesses = new Map<string, ChildProcess>();
+
+// Helper to get stage codes for spec phases
+function getPhaseStageCode(
+	phase: SpecPhase,
+	state: "running" | "complete" | "waiting" | "failed",
+): string | null {
+	const phaseMap: Record<SpecPhase, Record<string, string>> = {
+		constitution: {
+			running: SPEC_STAGE_CODES.constitution_running,
+			complete: SPEC_STAGE_CODES.constitution_complete,
+		},
+		specify: {
+			running: SPEC_STAGE_CODES.specify_running,
+			complete: SPEC_STAGE_CODES.specify_complete,
+		},
+		clarify: {
+			running: SPEC_STAGE_CODES.clarify_running,
+			complete: SPEC_STAGE_CODES.clarify_complete,
+			waiting: SPEC_STAGE_CODES.clarify_waiting,
+		},
+		plan: {
+			running: SPEC_STAGE_CODES.plan_running,
+			complete: SPEC_STAGE_CODES.plan_complete,
+		},
+		analyze: {
+			running: SPEC_STAGE_CODES.analyze_running,
+			complete: SPEC_STAGE_CODES.analyze_complete,
+			failed: SPEC_STAGE_CODES.analyze_failed,
+		},
+		tasks: {
+			running: SPEC_STAGE_CODES.tasks_running,
+			complete: SPEC_STAGE_CODES.tasks_complete,
+		},
+	};
+
+	return phaseMap[phase]?.[state] || null;
+}
+
+// Helper to update feature workflow stage with logging
+async function setFeatureStage(
+	featureId: string,
+	stageCode: string,
+	jobId: string,
+): Promise<void> {
+	try {
+		const success = await updateFeatureWorkflowStageByCode(
+			featureId,
+			stageCode,
+		);
+		if (success) {
+			await addJobMessage(
+				jobId,
+				"system",
+				`Updated workflow stage to: ${stageCode}`,
+			);
+		} else {
+			console.error(`Failed to update stage to ${stageCode} - stage not found`);
+		}
+	} catch (err) {
+		console.error("Error updating workflow stage:", err);
+		// Don't throw - stage update failure shouldn't fail the job
+	}
+}
 
 export async function runSpecJob(jobId: string): Promise<void> {
 	// Start trace for spec job
@@ -148,6 +213,12 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			status: "running",
 			started_at: new Date().toISOString(),
 		});
+
+		// Update workflow stage to running
+		const runningStage = getPhaseStageCode(specPhase, "running");
+		if (runningStage) {
+			await setFeatureStage(job.feature_id, runningStage, jobId);
+		}
 
 		addSpanEvent(trace, "spec_phase_started", { phase: specPhase });
 		await addJobMessage(
@@ -450,6 +521,12 @@ export async function runSpecJob(jobId: string): Promise<void> {
 					"Analysis found issues - manual review required before proceeding to tasks",
 				);
 				nextPhase = null;
+				// Set analyze_failed stage
+				await setFeatureStage(
+					job.feature_id,
+					SPEC_STAGE_CODES.analyze_failed,
+					jobId,
+				);
 			}
 		}
 
@@ -518,11 +595,18 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			console.error("Learning from spec phase failed:", learnErr);
 		}
 
+		// Update workflow stage based on outcome
 		if (needsHumanInput) {
 			await addJobMessage(
 				jobId,
 				"system",
 				"Waiting for human input on clarifications",
+			);
+			// Set clarify_waiting stage
+			await setFeatureStage(
+				job.feature_id,
+				SPEC_STAGE_CODES.clarify_waiting,
+				jobId,
 			);
 		} else if (nextPhase) {
 			await addJobMessage(
@@ -530,11 +614,27 @@ export async function runSpecJob(jobId: string): Promise<void> {
 				"system",
 				`Next phase: ${SPEC_PHASES[nextPhase].name}`,
 			);
+			// Set phase complete stage (if not already set by special case)
+			const completeStage = getPhaseStageCode(specPhase, "complete");
+			if (completeStage) {
+				await setFeatureStage(job.feature_id, completeStage, jobId);
+			}
 		} else if (specPhase === "tasks") {
 			await addJobMessage(
 				jobId,
 				"system",
 				"Spec-Kit complete! Feature is ready for implementation (Ralph)",
+			);
+			// Set tasks_complete, then spec_complete
+			await setFeatureStage(
+				job.feature_id,
+				SPEC_STAGE_CODES.tasks_complete,
+				jobId,
+			);
+			await setFeatureStage(
+				job.feature_id,
+				SPEC_STAGE_CODES.spec_complete,
+				jobId,
 			);
 		}
 
