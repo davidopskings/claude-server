@@ -21,10 +21,10 @@ bun test tests/integration/ # Integration tests only
 
 ### Results
 
-```
-475 pass, 0 fail
-1225 expect() calls
-19 test files
+```text
+502 pass, 0 fail
+1300 expect() calls
+21 test files
 ```
 
 | Test File | Tests | Covers |

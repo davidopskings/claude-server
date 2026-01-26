@@ -81,13 +81,13 @@ export async function createWorktree(
 	return worktreePath;
 }
 
-export async function cleanupWorktree(
-	barePath: string,
+export async function removeWorktree(
+	repo: CodeRepository,
 	worktreePath: string,
 ): Promise<void> {
 	operations.push({
-		operation: "cleanupWorktree",
-		args: { barePath, worktreePath },
+		operation: "removeWorktree",
+		args: { repoId: repo.id, repoName: repo.repo_name, worktreePath },
 		timestamp: new Date(),
 	});
 

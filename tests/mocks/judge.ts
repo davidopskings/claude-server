@@ -8,7 +8,7 @@ import type { JudgeContext, JudgeResult } from "../../src/spec/judge.js";
 // Re-export types for convenience
 export type { JudgeContext, JudgeResult };
 
-let mockJudgeResult: JudgeResult = {
+const DEFAULT_JUDGE_RESULT: JudgeResult = {
 	passed: true,
 	overallScore: 85,
 	criteria: [
@@ -22,24 +22,14 @@ let mockJudgeResult: JudgeResult = {
 	improvements: [],
 };
 
+let mockJudgeResult: JudgeResult = { ...DEFAULT_JUDGE_RESULT };
+
 let judgeCalls: JudgeContext[] = [];
 let judgeResultSequence: JudgeResult[] | null = null;
 let callIndex = 0;
 
 export function resetMockJudge(): void {
-	mockJudgeResult = {
-		passed: true,
-		overallScore: 85,
-		criteria: [
-			{
-				criterion: "Code follows existing patterns",
-				passed: true,
-				reasoning: "Plan follows established patterns",
-			},
-		],
-		summary: "Plan passes quality gate",
-		improvements: [],
-	};
+	mockJudgeResult = { ...DEFAULT_JUDGE_RESULT };
 	judgeCalls = [];
 	judgeResultSequence = null;
 	callIndex = 0;

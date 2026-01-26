@@ -8,7 +8,7 @@ import type { ImproveContext, ImproveResult } from "../../src/spec/improve.js";
 // Re-export types for convenience
 export type { ImproveContext, ImproveResult };
 
-let mockImproveResult: ImproveResult = {
+const DEFAULT_IMPROVE_RESULT: ImproveResult = {
 	success: true,
 	improvedPlan: {
 		architecture: "Improved architecture",
@@ -19,19 +19,12 @@ let mockImproveResult: ImproveResult = {
 	iteration: 0,
 };
 
+let mockImproveResult: ImproveResult = { ...DEFAULT_IMPROVE_RESULT };
+
 let improveCalls: ImproveContext[] = [];
 
 export function resetMockImprove(): void {
-	mockImproveResult = {
-		success: true,
-		improvedPlan: {
-			architecture: "Improved architecture",
-			techDecisions: ["Improved decision"],
-			fileStructure: ["src/improved.ts"],
-		},
-		changesSummary: ["Fixed issues from judge feedback"],
-		iteration: 0,
-	};
+	mockImproveResult = { ...DEFAULT_IMPROVE_RESULT };
 	improveCalls = [];
 }
 

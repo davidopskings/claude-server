@@ -160,12 +160,14 @@ describe("allClarificationsAnswered", () => {
 			{
 				id: "CLR-001",
 				question: "Q1?",
+				context: "C1",
 				response: "A1",
 				respondedAt: "2025-01-01T00:00:00.000Z",
 			},
 			{
 				id: "CLR-002",
 				question: "Q2?",
+				context: "C2",
 				response: "A2",
 				respondedAt: "2025-01-01T00:00:00.000Z",
 			},
@@ -180,10 +182,11 @@ describe("allClarificationsAnswered", () => {
 			{
 				id: "CLR-001",
 				question: "Q1?",
+				context: "C1",
 				response: "A1",
 				respondedAt: "2025-01-01T00:00:00.000Z",
 			},
-			{ id: "CLR-002", question: "Q2?" },
+			{ id: "CLR-002", question: "Q2?", context: "C2" },
 		]);
 
 		const result = await allClarificationsAnswered("feature-clr-1");
