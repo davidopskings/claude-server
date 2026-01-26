@@ -54,6 +54,13 @@ export async function ensureBareRepo(repo: CodeRepository): Promise<string> {
 }
 
 export async function fetchOrigin(repo: CodeRepository): Promise<void> {
+	const barePath = `/tmp/repos/${repo.repo_name}.git`;
+	if (!bareRepos.has(barePath)) {
+		throw new Error(
+			`Cannot fetch: bare repo for ${repo.repo_name} does not exist. Call ensureBareRepo first.`,
+		);
+	}
+
 	operations.push({
 		operation: "fetchOrigin",
 		args: { repoId: repo.id, repoName: repo.repo_name },

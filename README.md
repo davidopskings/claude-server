@@ -43,11 +43,13 @@ bun test tests/integration/ # Integration tests only
 | `unit/queue.test.ts` | 22 | Job routing, slot calculation, cancellation |
 | `unit/mcp.test.ts` | 21 | MCP tools/resources schema, parameter handling |
 | `integration/api.test.ts` | 21 | API endpoint validation, request/response shapes |
+| `integration/spec-runner.test.ts` | 19 | runSpecJob phases, auto-progression, error handling, memory |
 | `unit/spec/auto-progression.test.ts` | 20 | Phase auto-progression, human gates, analyze stops |
 | `unit/prd.test.ts` | 20 | JSON extraction, feature context, PRD structure |
 | `unit/spec/improve.test.ts` | 18 | Auto-improve loop, plan parsing |
 | `unit/spec/judge.test.ts` | 15 | LLM judge criteria, scoring, prompt building |
 | `unit/constitution.test.ts` | 13 | Constitution reuse, generation |
+| `integration/spec-clarification.test.ts` | 8 | submitClarification, allClarificationsAnswered |
 
 ### Coverage Notes
 
