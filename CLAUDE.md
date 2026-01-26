@@ -163,14 +163,6 @@ cp /tmp/types.ts apps/web/src/utils/supabase/database.types.ts
 cp /tmp/types.ts ../claude-server/src/types/supabase.ts
 ```
 
-### Implementation Gaps (Stub/Placeholder)
-These modules exist but may need completion:
-- `src/memory/` - Memory layer (uses `agent_memory` table)
-- `src/agents/` - Multi-agent conductor pattern
-- `src/skills/` - Skill library system
-- `src/scheduling/` - Token prediction
-- `src/observability/` - Distributed tracing
-
 ## Notes for Claude Sessions
 
 1. **Use bun, not npm** - preinstall script blocks npm/pnpm/yarn
