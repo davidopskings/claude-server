@@ -26,6 +26,7 @@ import {
 	syncTodosFromPrd,
 	type TodoInsert,
 	updateFeaturePrd,
+	updateFeatureSpecOutput,
 	updateFeatureWorkflowStageByCode,
 	updateIteration,
 	updateJob,
@@ -1248,6 +1249,11 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 						commit_sha: firstCommit.sha,
 					});
 				}
+
+				// Sync prd.stories with passes: true to database so API returns correct status
+				await updateJob(jobId, {
+					prd: updatedPrd as unknown as Json,
+				});
 			}
 
 			// Update current story being worked on (first incomplete)
@@ -2346,11 +2352,19 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 				// This ensures previously completed tasks are also marked
 				for (const taskId of completedTaskIds) {
 					const task = specOutput.tasks.find((t) => t.id === taskId);
-					if (task) task.completed = true;
+					if (task) {
+						task.completed = true;
+						(task as Record<string, unknown>).passes = true; // OS also checks passes
+					}
 				}
 				await updateJob(jobId, {
 					spec_output: specOutput as unknown as Json,
 				});
+
+				// Also update feature's spec_output so OS dashboard shows task completion
+				if (job.feature_id) {
+					await updateFeatureSpecOutput(job.feature_id, specOutput);
+				}
 
 				// Try to find the commit
 				let commitSha: string | null = null;
