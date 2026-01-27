@@ -33,6 +33,7 @@ import {
 	getRepositoryByClientId,
 	getSpecJobsForFeature,
 	updateFeatureSpecOutput,
+	updateFeatureWorkflowStageByCode,
 } from "./db/queries.js";
 import type { SpecPhase } from "./db/types.js";
 import {
@@ -1107,15 +1108,38 @@ app.post(
 				response,
 			);
 
+			// Auto-progress to plan phase when all clarifications are answered
+			if (result.remainingQuestions === 0) {
+				const feature = await getFeature(featureId);
+				if (feature) {
+					await updateFeatureWorkflowStageByCode(featureId, "clarify_complete");
+					const nextJob = await createSpecJob({
+						clientId: feature.client_id,
+						featureId,
+						specPhase: "plan",
+					});
+					processQueue();
+
+					res.json({
+						featureId,
+						clarificationId,
+						submitted: true,
+						remainingQuestions: 0,
+						message:
+							"All clarifications answered! Auto-progressing to plan phase.",
+						autoProgressedTo: "plan",
+						nextJobId: nextJob.id,
+					});
+					return;
+				}
+			}
+
 			res.json({
 				featureId,
 				clarificationId,
 				submitted: true,
 				remainingQuestions: result.remainingQuestions,
-				message:
-					result.remainingQuestions === 0
-						? "All clarifications answered! Ready to run plan phase."
-						: `${result.remainingQuestions} questions remaining`,
+				message: `${result.remainingQuestions} questions remaining`,
 			});
 		} catch (err) {
 			console.error("Submit clarification error:", err);

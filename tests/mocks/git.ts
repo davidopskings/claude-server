@@ -3,6 +3,8 @@
  * Simulates git commands without touching the filesystem
  */
 
+import type { AgentJob, CodeRepository } from "../../src/db/types.js";
+
 // Track git operations for assertions
 let operations: Array<{
 	operation: string;
@@ -38,64 +40,64 @@ export function getWorktrees(): Map<
 
 // Mock implementations of git functions
 
-export async function ensureBareRepo(
-	repoUrl: string,
-	reposDir: string,
-): Promise<string> {
+export async function ensureBareRepo(repo: CodeRepository): Promise<string> {
 	operations.push({
 		operation: "ensureBareRepo",
-		args: { repoUrl, reposDir },
+		args: { repoId: repo.id, repoName: repo.repo_name },
 		timestamp: new Date(),
 	});
 
-	const repoName = repoUrl.split("/").pop()?.replace(".git", "") || "repo";
-	const barePath = `${reposDir}/${repoName}.git`;
+	const barePath = `/tmp/repos/${repo.repo_name}.git`;
 	bareRepos.add(barePath);
 
 	return barePath;
 }
 
-export async function fetchOrigin(barePath: string): Promise<void> {
+export async function fetchOrigin(repo: CodeRepository): Promise<void> {
+	const barePath = `/tmp/repos/${repo.repo_name}.git`;
+	if (!bareRepos.has(barePath)) {
+		throw new Error(
+			`Cannot fetch: bare repo for ${repo.repo_name} does not exist. Call ensureBareRepo first.`,
+		);
+	}
+
 	operations.push({
 		operation: "fetchOrigin",
-		args: { barePath },
+		args: { repoId: repo.id, repoName: repo.repo_name },
 		timestamp: new Date(),
 	});
-
-	if (!bareRepos.has(barePath)) {
-		throw new Error(`Bare repo not found: ${barePath}`);
-	}
 }
 
 export async function createWorktree(
-	barePath: string,
-	worktreesDir: string,
-	branchName: string,
-	baseBranch: string,
+	repo: CodeRepository,
+	job: AgentJob,
 ): Promise<string> {
 	operations.push({
 		operation: "createWorktree",
-		args: { barePath, worktreesDir, branchName, baseBranch },
+		args: { repoId: repo.id, jobId: job.id, branch: job.branch_name },
 		timestamp: new Date(),
 	});
 
-	const worktreePath = `${worktreesDir}/${branchName}`;
+	const barePath = `/tmp/repos/${repo.repo_name}.git`;
+	bareRepos.add(barePath);
+
+	const worktreePath = `/tmp/worktrees/${repo.repo_name}/${job.id}`;
 	worktrees.set(worktreePath, {
 		repoUrl: barePath,
-		branch: branchName,
+		branch: job.branch_name,
 		path: worktreePath,
 	});
 
 	return worktreePath;
 }
 
-export async function cleanupWorktree(
-	barePath: string,
+export async function removeWorktree(
+	repo: CodeRepository,
 	worktreePath: string,
 ): Promise<void> {
 	operations.push({
-		operation: "cleanupWorktree",
-		args: { barePath, worktreePath },
+		operation: "removeWorktree",
+		args: { repoId: repo.id, repoName: repo.repo_name, worktreePath },
 		timestamp: new Date(),
 	});
 

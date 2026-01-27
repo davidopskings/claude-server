@@ -17,13 +17,11 @@ import type {
 export const testClient: Partial<Client> & { id: string } = {
 	id: "client-test-1",
 	name: "Test Client",
-	description: "A test client for unit tests",
 };
 
 export const anotherClient: Partial<Client> & { id: string } = {
 	id: "client-test-2",
 	name: "Another Client",
-	description: "Another test client",
 };
 
 // ----- Repositories -----
@@ -54,10 +52,6 @@ export const testFeature: Partial<Feature> & { id: string } = {
 	id: "feature-test-1",
 	client_id: "client-test-1",
 	title: "Add user authentication",
-	description: "Implement login and signup functionality",
-	status: "todo",
-	priority: "high",
-	workflow_stage: "spec_ready",
 	functionality_notes: "Should support email/password auth",
 };
 
@@ -65,17 +59,12 @@ export const simpleFeature: Partial<Feature> & { id: string } = {
 	id: "feature-test-2",
 	client_id: "client-test-1",
 	title: "Fix typo in header",
-	description: "Simple text change",
-	status: "todo",
-	priority: "low",
 };
 
 export const featureWithSpec: Partial<Feature> & { id: string } = {
 	id: "feature-test-3",
 	client_id: "client-test-1",
 	title: "Feature with existing spec",
-	description: "Has spec output already",
-	status: "in_progress",
 	spec_output: {
 		phase: "plan",
 		constitution: "# Standards\n- TypeScript strict mode",
@@ -115,7 +104,7 @@ export const runningJob: Partial<AgentJob> & { id: string } = {
 	branch_name: "feat/running-test",
 	prompt: "Build entire authentication system",
 	started_at: new Date().toISOString(),
-	iteration_count: 3,
+	current_iteration: 3,
 	max_iterations: 10,
 };
 

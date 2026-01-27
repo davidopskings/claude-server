@@ -11,6 +11,7 @@ import {
 	updateJob,
 } from "../db/index.js";
 import {
+	createSpecJob,
 	getClientConstitution,
 	getRepositoryByClientId,
 	getRepositoryById,
@@ -619,6 +620,24 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			if (completeStage) {
 				await setFeatureStage(job.feature_id, completeStage, jobId);
 			}
+
+			// Auto-create next phase job
+			await addJobMessage(
+				jobId,
+				"system",
+				`Auto-progressing to ${SPEC_PHASES[nextPhase].name}...`,
+			);
+			const nextJob = await createSpecJob({
+				clientId: job.client_id,
+				featureId: job.feature_id,
+				repositoryId: job.repository_id ?? undefined,
+				specPhase: nextPhase,
+			});
+			await addJobMessage(
+				jobId,
+				"system",
+				`Queued next phase job: ${nextJob.id}`,
+			);
 		} else if (specPhase === "tasks") {
 			await addJobMessage(
 				jobId,
