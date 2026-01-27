@@ -78,9 +78,12 @@ export async function createWorktree(
 		timestamp: new Date(),
 	});
 
+	const barePath = `/tmp/repos/${repo.repo_name}.git`;
+	bareRepos.add(barePath);
+
 	const worktreePath = `/tmp/worktrees/${repo.repo_name}/${job.id}`;
 	worktrees.set(worktreePath, {
-		repoUrl: `/tmp/repos/${repo.repo_name}.git`,
+		repoUrl: barePath,
 		branch: job.branch_name,
 		path: worktreePath,
 	});
