@@ -41,6 +41,12 @@ import {
 	startTrace,
 } from "./observability/index.js";
 import {
+	collectScreenshots,
+	getPlaywrightPromptInstructions,
+	isCosmeticFeature,
+	uploadScreenshots,
+} from "./playwright/index.js";
+import {
 	extractJobFeatures,
 	predictTokens,
 	recordActualUsage,
@@ -349,6 +355,30 @@ export async function runRalphJob(jobId: string): Promise<void> {
 	const completionPromise = job.completion_promise || "RALPH_COMPLETE";
 	const feedbackCommands = (job.feedback_commands as string[] | null) || [];
 
+	// Detect cosmetic feature for Playwright integration
+	let isCosmetic = false;
+	if (job.feature_id) {
+		try {
+			const feature = await getFeature(job.feature_id);
+			isCosmetic = isCosmeticFeature(feature?.feature_type_id);
+		} catch {
+			// Feature lookup failed - continue without cosmetic detection
+		}
+	}
+
+	// Inject Playwright feedback command for cosmetic features
+	if (
+		isCosmetic &&
+		!feedbackCommands.some((cmd) => cmd.includes("playwright"))
+	) {
+		feedbackCommands.push("npx playwright test --reporter=list");
+		await addJobMessage(
+			jobId,
+			"system",
+			"Cosmetic feature detected - added Playwright test command to feedback",
+		);
+	}
+
 	// Extract features and predict tokens
 	try {
 		const features = await extractJobFeatures(
@@ -454,6 +484,7 @@ export async function runRalphJob(jobId: string): Promise<void> {
 				maxIterations,
 				completionPromise,
 				worktreePath,
+				isCosmetic,
 			);
 
 			// Run Claude for this iteration (with retry on crash)
@@ -529,6 +560,28 @@ export async function runRalphJob(jobId: string): Promise<void> {
 				appendFeedbackToProgress(worktreePath, feedbackResults, i);
 			}
 
+			// Collect and upload screenshots for cosmetic features
+			if (isCosmetic && worktreePath) {
+				const screenshots = collectScreenshots(worktreePath);
+				if (screenshots.length > 0) {
+					await addJobMessage(
+						jobId,
+						"system",
+						`Found ${screenshots.length} screenshot(s), uploading...`,
+					);
+					const uploaded = await uploadScreenshots(
+						screenshots,
+						jobId,
+						job.feature_id,
+					);
+					await addJobMessage(
+						jobId,
+						"system",
+						`Uploaded ${uploaded.length} screenshot(s)`,
+					);
+				}
+			}
+
 			// Append iteration summary to progress file
 			appendIterationToProgress(worktreePath, i, result.summary);
 
@@ -543,6 +596,19 @@ export async function runRalphJob(jobId: string): Promise<void> {
 				"system",
 				`\nReached maximum iterations (${maxIterations}) without completion.`,
 			);
+		}
+
+		// Final screenshot collection for cosmetic features
+		if (isCosmetic && worktreePath) {
+			const finalScreenshots = collectScreenshots(worktreePath);
+			if (finalScreenshots.length > 0) {
+				await addJobMessage(
+					jobId,
+					"system",
+					`Final screenshot collection: ${finalScreenshots.length} file(s)`,
+				);
+				await uploadScreenshots(finalScreenshots, jobId, job.feature_id);
+			}
 		}
 
 		// 4. Post-loop: Commit, push, create PR
@@ -754,8 +820,12 @@ function buildIterationPrompt(
 	maxIterations: number,
 	completionPromise: string,
 	worktreePath: string,
+	isCosmetic = false,
 ): string {
 	const progressContent = readProgressFile(worktreePath);
+	const playwrightInstructions = isCosmetic
+		? getPlaywrightPromptInstructions()
+		: "";
 
 	return `## Ralph Loop Context
 - Iteration: ${iteration} of ${maxIterations}
@@ -766,7 +836,7 @@ ${progressContent || "No previous progress - this is the first iteration."}
 
 ## Your Task
 ${basePrompt}
-
+${playwrightInstructions}
 ## Instructions
 1. Review the progress above from previous iterations
 2. Continue working on the task
@@ -954,6 +1024,18 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 
 	const maxIterations = job.max_iterations || 10;
 	// Note: feedbackCommands no longer used - Claude runs tests itself (matching original Ralph pattern)
+
+	// Detect cosmetic feature for Playwright integration
+	let isPrdCosmetic = false;
+	if (job.feature_id) {
+		try {
+			const feature = await getFeature(job.feature_id);
+			isPrdCosmetic = isCosmeticFeature(feature?.feature_type_id);
+		} catch {
+			// Feature lookup failed - continue without cosmetic detection
+		}
+	}
+
 	const prd = job.prd as unknown as Prd;
 	const prdProgress: PrdProgress =
 		(job.prd_progress as unknown as PrdProgress) || {
@@ -1091,6 +1173,7 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 				i,
 				maxIterations,
 				job.branch_name,
+				isPrdCosmetic,
 			);
 
 			// Run Claude for this iteration (with retry on crash)
@@ -1271,6 +1354,28 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 				promise_detected: result.promiseDetected || newlyCompleted.length > 0,
 				output_summary: result.summary,
 			});
+
+			// Collect and upload screenshots for cosmetic features
+			if (isPrdCosmetic && worktreePath) {
+				const screenshots = collectScreenshots(worktreePath);
+				if (screenshots.length > 0) {
+					await addJobMessage(
+						jobId,
+						"system",
+						`Found ${screenshots.length} screenshot(s), uploading...`,
+					);
+					const uploaded = await uploadScreenshots(
+						screenshots,
+						jobId,
+						job.feature_id,
+					);
+					await addJobMessage(
+						jobId,
+						"system",
+						`Uploaded ${uploaded.length} screenshot(s)`,
+					);
+				}
+			}
 
 			// Append to progress file (no feedback results - Claude runs tests itself)
 			appendPrdIterationToProgress(
@@ -1979,9 +2084,14 @@ function buildPrdIterationPrompt(
 	iteration: number,
 	maxIterations: number,
 	branchName: string,
+	isCosmetic = false,
 ): string {
 	// Simplified prompt matching original Ralph pattern
 	// Claude reads prd.json and progress.txt itself, runs tests itself
+	const playwrightInstructions = isCosmetic
+		? getPlaywrightPromptInstructions()
+		: "";
+
 	return `# Ralph Agent Instructions
 
 You are an autonomous coding agent working on a software project.
@@ -1993,7 +2103,7 @@ You are an autonomous coding agent working on a software project.
 
 ## Your Task
 ${basePrompt}
-
+${playwrightInstructions}
 ## Workflow
 1. Read the PRD at \`prd.json\` in the repo root
 2. Read the progress log at \`progress.txt\` (check Codebase Patterns section first)
@@ -2166,6 +2276,17 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 		return;
 	}
 
+	// Detect cosmetic feature for Playwright integration
+	let isSpecCosmetic = false;
+	if (job.feature_id) {
+		try {
+			const feature = await getFeature(job.feature_id);
+			isSpecCosmetic = isCosmeticFeature(feature?.feature_type_id);
+		} catch {
+			// Feature lookup failed - continue without cosmetic detection
+		}
+	}
+
 	// Track task completion state
 	const completedTaskIds: number[] = [];
 	let worktreePath: string | null = null;
@@ -2289,6 +2410,7 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 				maxIterations,
 				job.branch_name,
 				job.feature_id || undefined,
+				isSpecCosmetic,
 			);
 
 			// Run Claude for this iteration
@@ -2422,6 +2544,28 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 						jobId,
 						"system",
 						`Warning: Failed to push: ${err}`,
+					);
+				}
+			}
+
+			// Collect and upload screenshots for cosmetic features
+			if (isSpecCosmetic && worktreePath) {
+				const screenshots = collectScreenshots(worktreePath);
+				if (screenshots.length > 0) {
+					await addJobMessage(
+						jobId,
+						"system",
+						`Found ${screenshots.length} screenshot(s), uploading...`,
+					);
+					const uploaded = await uploadScreenshots(
+						screenshots,
+						jobId,
+						job.feature_id,
+					);
+					await addJobMessage(
+						jobId,
+						"system",
+						`Uploaded ${uploaded.length} screenshot(s)`,
 					);
 				}
 			}
@@ -2659,6 +2803,7 @@ function buildSpecIterationPrompt(
 	maxIterations: number,
 	branchName: string,
 	featureId?: string,
+	isCosmetic = false,
 ): string {
 	// Format clarifications with responses
 	const clarificationsSection =
@@ -2687,6 +2832,10 @@ function buildSpecIterationPrompt(
 	// Format existing patterns from analysis
 	const existingPatterns =
 		specOutput.analysis?.existingPatterns?.join("\n- ") || "None identified";
+
+	const playwrightInstructions = isCosmetic
+		? getPlaywrightPromptInstructions()
+		: "";
 
 	return `# Spec-Kit Implementation Agent
 
@@ -2756,7 +2905,7 @@ ${currentTask.files.map((f) => `- ${f}`).join("\n")}
 **Dependencies:** ${currentTask.dependencies.length > 0 ? currentTask.dependencies.map((d) => `#${d}`).join(", ") : "None"} (all completed ✓)
 
 ---
-
+${playwrightInstructions}
 ## Your Instructions
 
 1. Implement ONLY Task #${currentTask.id}

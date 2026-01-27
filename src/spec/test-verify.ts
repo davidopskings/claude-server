@@ -26,6 +26,8 @@ const DEFAULT_TEST_PATTERNS = [
 	{ check: "bun.lockb", commands: ["bun test"] },
 	{ check: "yarn.lock", commands: ["yarn test"] },
 	{ check: "pnpm-lock.yaml", commands: ["pnpm test"] },
+	{ check: "playwright.config.ts", commands: ["npx playwright test"] },
+	{ check: "playwright.config.js", commands: ["npx playwright test"] },
 	{ check: "pytest.ini", commands: ["pytest"] },
 	{ check: "pyproject.toml", commands: ["pytest", "python -m pytest"] },
 	{ check: "Cargo.toml", commands: ["cargo test"] },

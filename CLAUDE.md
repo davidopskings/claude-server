@@ -43,6 +43,60 @@ The `opskings-operating-system` web app connects to this server via HTTP API:
 - Set `AGENTS_API_SECRET` to match `AGENT_API_SECRET` here
 - The OS web app calls endpoints like `/jobs`, `/features/:id/spec/start` etc.
 
+## Playwright Screenshot Evidence (Cosmetic Features)
+
+When a feature has `feature_type_id = "acd9cd67-b58f-4cdf-b588-b386d812f69c"` (Cosmetic Change Request), the Ralph runners automatically:
+1. Inject Playwright instructions into the Claude prompt (write e2e tests + capture screenshots)
+2. Add `npx playwright test --reporter=list` to feedback commands
+3. After each iteration, collect screenshots from `test-results/` and `playwright-report/`
+4. Upload them to Supabase Storage bucket `screenshots` at path `jobs/{jobId}/{fileName}`
+5. Create `attachments` records linked to the feature
+
+### Detection Flow
+```
+features.feature_type_id = "acd9cd67-..." (set by OS when feature is created)
+  → runner loads feature via getFeature(job.feature_id)
+  → isCosmeticFeature(feature.feature_type_id) returns true
+  → Playwright prompt + feedback + screenshot collection activated
+```
+
+No special flags needed from the OS -- detection is automatic from the feature type.
+
+### API Endpoint
+```
+GET /attachments/:entityType/:entityId
+```
+Returns `{ attachments: [...] }` where each attachment has `id`, `url`, `file_name`, `mime_type`, `storage_path`, `metadata`, `created_at`.
+
+Example: `GET /attachments/feature/{featureId}` returns all screenshots for that feature.
+
+### OS Integration Checklist
+
+The `opskings-operating-system` repo needs:
+
+1. **Supabase Storage bucket** (one-time setup in Supabase dashboard):
+   - Create a bucket named `screenshots`
+   - Set it to **public** so `getPublicUrl()` returns accessible URLs
+
+2. **Fetch attachments from the agents API**:
+   - Call `GET ${AGENTS_API_URL}/attachments/feature/${featureId}` with Bearer auth
+   - Response shape: `{ attachments: Array<{ id, url, file_name, mime_type, storage_path, metadata, created_at }> }`
+   - `metadata.fileSize` contains the file size in bytes
+   - `url` is a public Supabase Storage URL pointing to the screenshot image
+
+3. **Display screenshots on the feature detail page**:
+   - Show a gallery/grid of screenshot thumbnails when attachments exist
+   - Each attachment `url` is a direct link to the PNG/JPG image
+   - Only cosmetic features will have screenshots, but the endpoint works for any entity type
+
+4. **No migrations needed** -- the `attachments` table already exists with columns: `entity_type`, `entity_id`, `file_name`, `mime_type`, `storage_path`, `url`, `metadata`
+
+### Key Files
+- `src/playwright/index.ts` - All Playwright logic (detection, prompt, collection, upload)
+- `src/db/queries.ts` - `createAttachment()`, `getAttachmentsByEntity()`, `uploadToStorage()`
+- `src/runner.ts` - Integration in `runRalphJob`, `runRalphPrdJob`, `runRalphSpecJob`
+- `src/spec/test-verify.ts` - Playwright config detection in test patterns
+
 ## Architecture Overview
 
 claude-server is an autonomous software development agent server that orchestrates AI-powered code generation through multiple execution models.
@@ -81,6 +135,7 @@ Sequential phases for feature specification:
 - `src/runner.ts` - Standard/Ralph/Task job execution
 - `src/spec/` - Spec-Kit pipeline (phases.ts, runner.ts, judge.ts, improve.ts)
 - `src/db/` - Supabase client, queries, types
+- `src/playwright/` - Cosmetic feature Playwright integration (screenshot evidence)
 - `src/git.ts` - Bare repo + worktree management
 - `src/memory/` - Cross-session context learning
 - `src/agents/` - Multi-agent orchestration (Conductor pattern)
@@ -146,6 +201,7 @@ bun tsc --noEmit   # Check types without emitting
 - Queue management
 - API endpoints
 - MCP server integration
+- Playwright screenshot evidence for cosmetic features
 
 ### Database Schema
 All migrations have been applied. Schema includes:

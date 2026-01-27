@@ -135,6 +135,14 @@ describe("buildConstitutionPrompt", () => {
 		expect(prompt).toContain("Tech Stack");
 	});
 
+	it("should enforce TDD in testing conventions", () => {
+		const prompt = buildConstitutionPrompt(sampleContext);
+		expect(prompt).toContain("Test-Driven Development");
+		expect(prompt).toContain(
+			"writing tests before or alongside implementation",
+		);
+	});
+
 	it("should specify JSON output format", () => {
 		const prompt = buildConstitutionPrompt(sampleContext);
 		expect(prompt).toContain("```json");
@@ -151,6 +159,37 @@ describe("buildConstitutionPrompt", () => {
 	it("should not include memories section when not provided", () => {
 		const prompt = buildConstitutionPrompt(sampleContext);
 		expect(prompt).not.toContain("Learnings from Previous Work");
+	});
+
+	it("should include UI regression testing section for cosmetic features", () => {
+		const cosmeticContext: PhasePromptContext = {
+			...sampleContext,
+			featureTypeId: "acd9cd67-b58f-4cdf-b588-b386d812f69c",
+		};
+		const prompt = buildConstitutionPrompt(cosmeticContext);
+		expect(prompt).toContain("UI & Regression Testing Standards");
+		expect(prompt).toContain("Playwright");
+		expect(prompt).toContain("cosmetic/UI feature");
+		expect(prompt).toContain("Feature Type: Cosmetic/UI Change");
+	});
+
+	it("should not include UI regression section for non-cosmetic features", () => {
+		const nonCosmeticContext: PhasePromptContext = {
+			...sampleContext,
+			featureTypeId: "0a083f70-3839-4ae4-af69-067c29ac29f5",
+		};
+		const prompt = buildConstitutionPrompt(nonCosmeticContext);
+		expect(prompt).not.toContain("UI & Regression Testing Standards");
+		expect(prompt).not.toContain("Feature Type: Cosmetic/UI Change");
+	});
+
+	it("should not include UI regression section when featureTypeId is null", () => {
+		const noTypeContext: PhasePromptContext = {
+			...sampleContext,
+			featureTypeId: null,
+		};
+		const prompt = buildConstitutionPrompt(noTypeContext);
+		expect(prompt).not.toContain("UI & Regression Testing Standards");
 	});
 });
 

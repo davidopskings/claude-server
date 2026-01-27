@@ -27,6 +27,7 @@ import {
 } from "./db/index.js";
 import {
 	createSpecJob,
+	getAttachmentsByEntity,
 	getClientConstitution,
 	getFeature,
 	getFeatureSpecOutput,
@@ -1218,6 +1219,29 @@ app.get("/spec/phases", async (_req: Request, res: Response) => {
 		})),
 	});
 });
+
+// ----- Attachments -----
+
+app.get(
+	"/attachments/:entityType/:entityId",
+	async (req: Request, res: Response) => {
+		try {
+			const entityType = getParam(req.params, "entityType");
+			const entityId = getParam(req.params, "entityId");
+
+			if (!entityType || !entityId) {
+				return res
+					.status(400)
+					.json({ error: "entityType and entityId are required" });
+			}
+
+			const attachments = await getAttachmentsByEntity(entityType, entityId);
+			res.json({ attachments });
+		} catch (err) {
+			res.status(500).json({ error: (err as Error).message });
+		}
+	},
+);
 
 // ----- Sync -----
 

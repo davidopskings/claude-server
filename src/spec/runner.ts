@@ -285,6 +285,7 @@ export async function runSpecJob(jobId: string): Promise<void> {
 		const promptContext: PhasePromptContext = {
 			featureTitle: feature.title,
 			featureDescription: feature.functionality_notes || undefined,
+			featureTypeId: feature.feature_type_id,
 			clientName: feature.client?.name || "Unknown",
 			repoName: `${repo.owner_name}/${repo.repo_name}`,
 			existingConstitution: clientConstitution || existingOutput?.constitution,
