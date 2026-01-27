@@ -19,39 +19,7 @@ bun test tests/unit/        # Unit tests only
 bun test tests/integration/ # Integration tests only
 ```
 
-### Results
-
-```text
-502 pass, 0 fail
-1300 expect() calls
-21 test files
-```
-
-| Test File | Tests | Covers |
-|-----------|------:|--------|
-| `unit/runner.test.ts` | 46 | Prompt building, output extraction, story tracking |
-| `unit/scheduling.test.ts` | 43 | Token prediction, job features, capacity |
-| `unit/spec/phases.test.ts` | 35 | Phase metadata, transitions, prompt builders |
-| `unit/memory.test.ts` | 31 | Memory recall, learning, formatting |
-| `integration/spec-flow.test.ts` | 26 | Phase flow, state machine, output validation |
-| `unit/spec/test-verify.test.ts` | 25 | Test command detection, pattern matching |
-| `unit/ralph-spec.test.ts` | 25 | Ralph spec-mode prompt building |
-| `unit/observability.test.ts` | 25 | Span tracing, metrics, export |
-| `unit/skills.test.ts` | 23 | Skill detection, interpolation, execution |
-| `unit/git.test.ts` | 23 | Path generation, branch names, PR formatting |
-| `unit/agents.test.ts` | 23 | Agent routing, conductor workflow |
-| `unit/queue.test.ts` | 22 | Job routing, slot calculation, cancellation |
-| `unit/mcp.test.ts` | 21 | MCP tools/resources schema, parameter handling |
-| `integration/api.test.ts` | 21 | API endpoint validation, request/response shapes |
-| `integration/spec-runner.test.ts` | 19 | runSpecJob phases, auto-progression, error handling, memory |
-| `unit/spec/auto-progression.test.ts` | 20 | Phase auto-progression, human gates, analyze stops |
-| `unit/prd.test.ts` | 20 | JSON extraction, feature context, PRD structure |
-| `unit/spec/improve.test.ts` | 18 | Auto-improve loop, plan parsing |
-| `unit/spec/judge.test.ts` | 15 | LLM judge criteria, scoring, prompt building |
-| `unit/constitution.test.ts` | 13 | Constitution reuse, generation |
-| `integration/spec-clarification.test.ts` | 8 | submitClarification, allClarificationsAnswered |
-
-### Coverage Notes
+### Coverage
 
 All **pure logic functions** across the codebase are tested (100% of extractable pure functions). Tests replicate pure functions from source modules to avoid requiring database or filesystem mocks.
 
