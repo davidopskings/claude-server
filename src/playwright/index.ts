@@ -1,15 +1,17 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { createAttachment, uploadToStorage } from "../db/queries.js";
 
-export { isCosmeticFeature } from "./detection.js";
+export { COSMETIC_FEATURE_TYPE_ID, isCosmeticFeature } from "./detection.js";
 
-const MAX_SCREENSHOTS = 20;
-const SCREENSHOT_EXTENSIONS = [".png", ".jpg", ".jpeg"];
-const SCREENSHOT_DIRS = ["test-results", "playwright-report"];
+export const MAX_SCREENSHOTS = 20;
+export const SCREENSHOT_EXTENSIONS = [".png", ".jpg", ".jpeg"] as const;
+export const SCREENSHOT_DIRS = ["test-results", "playwright-report"] as const;
 
 export interface ScreenshotFile {
 	path: string;
+	/** Relative path from worktree root (e.g., "test-results/hero.png") */
+	relativePath: string;
 	name: string;
 	size: number;
 }
@@ -77,7 +79,7 @@ export function collectScreenshots(worktreePath: string): ScreenshotFile[] {
 	for (const dir of SCREENSHOT_DIRS) {
 		const dirPath = join(worktreePath, dir);
 		try {
-			collectFromDir(dirPath, screenshots);
+			collectFromDir(worktreePath, dirPath, screenshots);
 		} catch {
 			// Directory doesn't exist or can't be read - skip
 		}
@@ -88,7 +90,11 @@ export function collectScreenshots(worktreePath: string): ScreenshotFile[] {
 	return screenshots.slice(0, MAX_SCREENSHOTS);
 }
 
-function collectFromDir(dirPath: string, results: ScreenshotFile[]): void {
+function collectFromDir(
+	worktreePath: string,
+	dirPath: string,
+	results: ScreenshotFile[],
+): void {
 	if (results.length >= MAX_SCREENSHOTS) return;
 
 	let entries: string[];
@@ -105,13 +111,14 @@ function collectFromDir(dirPath: string, results: ScreenshotFile[]): void {
 		try {
 			const stat = statSync(fullPath);
 			if (stat.isDirectory()) {
-				collectFromDir(fullPath, results);
+				collectFromDir(worktreePath, fullPath, results);
 			} else if (
 				stat.isFile() &&
 				SCREENSHOT_EXTENSIONS.some((ext) => entry.toLowerCase().endsWith(ext))
 			) {
 				results.push({
 					path: fullPath,
+					relativePath: relative(worktreePath, fullPath),
 					name: entry,
 					size: stat.size,
 				});
@@ -122,8 +129,12 @@ function collectFromDir(dirPath: string, results: ScreenshotFile[]): void {
 	}
 }
 
+// Track uploaded files per job to avoid duplicates across iterations
+const uploadedByJob = new Map<string, Set<string>>();
+
 /**
  * Upload collected screenshots to Supabase Storage and create attachment records.
+ * Deduplicates by relativePath to avoid re-uploading the same file across iterations.
  */
 export async function uploadScreenshots(
 	screenshots: ScreenshotFile[],
@@ -132,14 +143,27 @@ export async function uploadScreenshots(
 ): Promise<AttachmentRecord[]> {
 	const records: AttachmentRecord[] = [];
 
+	// Get or create set of already-uploaded paths for this job
+	let uploaded = uploadedByJob.get(jobId);
+	if (!uploaded) {
+		uploaded = new Set();
+		uploadedByJob.set(jobId, uploaded);
+	}
+
 	for (const screenshot of screenshots) {
+		// Skip if already uploaded in a previous iteration
+		if (uploaded.has(screenshot.relativePath)) {
+			continue;
+		}
+
 		try {
 			const fileBuffer = readFileSync(screenshot.path);
 			const contentType = screenshot.name.toLowerCase().endsWith(".png")
 				? "image/png"
 				: "image/jpeg";
 
-			const storagePath = `jobs/${jobId}/${screenshot.name}`;
+			// Use relativePath for unique storage path (e.g., "test-results/chromium/hero.png")
+			const storagePath = `jobs/${jobId}/${screenshot.relativePath}`;
 
 			const { publicUrl } = await uploadToStorage(
 				"screenshots",
@@ -167,6 +191,9 @@ export async function uploadScreenshots(
 				storagePath,
 				fileName: screenshot.name,
 			});
+
+			// Mark as uploaded
+			uploaded.add(screenshot.relativePath);
 		} catch (err) {
 			console.error(`Failed to upload screenshot ${screenshot.name}:`, err);
 			// Continue with remaining screenshots
@@ -174,4 +201,11 @@ export async function uploadScreenshots(
 	}
 
 	return records;
+}
+
+/**
+ * Clear upload tracking for a job (call when job completes or is cleaned up).
+ */
+export function clearUploadTracking(jobId: string): void {
+	uploadedByJob.delete(jobId);
 }

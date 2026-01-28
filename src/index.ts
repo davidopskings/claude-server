@@ -1222,6 +1222,8 @@ app.get("/spec/phases", async (_req: Request, res: Response) => {
 
 // ----- Attachments -----
 
+const VALID_ENTITY_TYPES = ["feature", "agent_job"] as const;
+
 app.get(
 	"/attachments/:entityType/:entityId",
 	async (req: Request, res: Response) => {
@@ -1233,6 +1235,16 @@ app.get(
 				return res
 					.status(400)
 					.json({ error: "entityType and entityId are required" });
+			}
+
+			if (
+				!VALID_ENTITY_TYPES.includes(
+					entityType as (typeof VALID_ENTITY_TYPES)[number],
+				)
+			) {
+				return res.status(400).json({
+					error: `entityType must be one of: ${VALID_ENTITY_TYPES.join(", ")}`,
+				});
 			}
 
 			const attachments = await getAttachmentsByEntity(entityType, entityId);

@@ -53,7 +53,7 @@ When a feature has `feature_type_id = "acd9cd67-b58f-4cdf-b588-b386d812f69c"` (C
 5. Create `attachments` records linked to the feature
 
 ### Detection Flow
-```
+```text
 features.feature_type_id = "acd9cd67-..." (set by OS when feature is created)
   → runner loads feature via getFeature(job.feature_id)
   → isCosmeticFeature(feature.feature_type_id) returns true
@@ -63,7 +63,7 @@ features.feature_type_id = "acd9cd67-..." (set by OS when feature is created)
 No special flags needed from the OS -- detection is automatic from the feature type.
 
 ### API Endpoint
-```
+```text
 GET /attachments/:entityType/:entityId
 ```
 Returns `{ attachments: [...] }` where each attachment has `id`, `url`, `file_name`, `mime_type`, `storage_path`, `metadata`, `created_at`.
@@ -103,7 +103,7 @@ claude-server is an autonomous software development agent server that orchestrat
 
 ### Core Processing Pipeline
 
-```
+```text
 HTTP Request → Queue (queue.ts) → Runner → Git Operations → PR Creation
                    ↓
               DB Queries (Supabase)
@@ -152,7 +152,7 @@ Uses bare repositories + worktrees for job isolation:
 
 ### Ralph Iteration Loop
 
-```
+```text
 For each iteration:
   1. Build prompt with progress context
   2. Run Claude iteration
@@ -169,7 +169,7 @@ All API endpoints require Bearer token authentication via `AGENT_API_SECRET` env
 
 ## Environment Variables
 
-```
+```text
 PORT                  # Server port (default: 3456)
 AGENT_API_SECRET      # Required authentication token
 MAX_CONCURRENT_JOBS   # Queue concurrency (default: 2)
