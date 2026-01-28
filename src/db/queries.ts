@@ -469,6 +469,7 @@ export interface FeatureWithClient {
 	client_id: string;
 	functionality_notes: string | null;
 	client_context: string | null;
+	feature_type_id: string | null;
 	client: { id: string; name: string } | null;
 }
 
@@ -483,6 +484,7 @@ export async function getFeature(
       client_id,
       functionality_notes,
       client_context,
+      feature_type_id,
       client:clients(id, name)
     `)
 		.eq("id", featureId)
@@ -902,6 +904,88 @@ export async function getClientConstitution(
 		generatedAt:
 			clientData.constitution_generated_at || new Date().toISOString(),
 	};
+}
+
+// ----- Attachments -----
+
+export interface AttachmentInsert {
+	entityType: string;
+	entityId: string;
+	fileName: string;
+	fileSize: number;
+	mimeType: string;
+	storagePath: string;
+	url: string;
+}
+
+export interface Attachment {
+	id: string;
+	entity_type: string;
+	entity_id: string;
+	file_name: string | null;
+	mime_type: string | null;
+	storage_path: string | null;
+	url: string | null;
+	metadata: Record<string, unknown> | null;
+	created_at: string | null;
+}
+
+export async function createAttachment(
+	data: AttachmentInsert,
+): Promise<{ id: string; url: string | null }> {
+	const { data: attachment, error } = await supabase
+		.from("attachments")
+		.insert({
+			entity_type: data.entityType,
+			entity_id: data.entityId,
+			file_name: data.fileName,
+			mime_type: data.mimeType,
+			storage_path: data.storagePath,
+			url: data.url,
+			metadata: { fileSize: data.fileSize } as unknown as Json,
+		})
+		.select("id, url")
+		.single();
+
+	if (error) throw error;
+	return attachment;
+}
+
+export async function getAttachmentsByEntity(
+	entityType: string,
+	entityId: string,
+): Promise<Attachment[]> {
+	const { data, error } = await supabase
+		.from("attachments")
+		.select("*")
+		.eq("entity_type", entityType)
+		.eq("entity_id", entityId)
+		.order("created_at", { ascending: false });
+
+	if (error) throw error;
+	return (data as unknown as Attachment[]) || [];
+}
+
+// ----- Storage -----
+
+export async function uploadToStorage(
+	bucket: string,
+	path: string,
+	file: Buffer,
+	contentType: string,
+): Promise<{ storagePath: string; publicUrl: string }> {
+	const { error } = await supabase.storage.from(bucket).upload(path, file, {
+		contentType,
+		upsert: true,
+	});
+
+	if (error) throw error;
+
+	const {
+		data: { publicUrl },
+	} = supabase.storage.from(bucket).getPublicUrl(path);
+
+	return { storagePath: path, publicUrl };
 }
 
 // Update client's constitution

@@ -1,4 +1,5 @@
 import type { SpecPhase } from "../db/types.js";
+import { isCosmeticFeature } from "../playwright/detection.js";
 
 // Phase order and metadata
 export const SPEC_PHASES: Record<
@@ -69,6 +70,7 @@ export function phaseRequiresHumanInput(phase: SpecPhase): boolean {
 export interface PhasePromptContext {
 	featureTitle: string;
 	featureDescription?: string;
+	featureTypeId?: string | null;
 	clientName: string;
 	repoName: string;
 	techStack?: string;
@@ -85,6 +87,27 @@ export function buildConstitutionPrompt(ctx: PhasePromptContext): string {
 		? `\n## Learnings from Previous Work\n${ctx.relevantMemories}\n`
 		: "";
 
+	const isCosmetic = isCosmeticFeature(ctx.featureTypeId);
+
+	const cosmeticSection = isCosmetic
+		? `
+6. **UI & Regression Testing Standards**
+   - Existing e2e or visual regression test setup (Playwright, Cypress, etc.)
+   - Component testing patterns (Storybook, Testing Library, etc.)
+   - Screenshot or visual snapshot conventions
+   - Responsive breakpoints and viewport sizes to test
+   - Design system or component library in use
+   - CSS/styling approach (CSS modules, Tailwind, styled-components, etc.)
+   - Accessibility testing requirements (axe, lighthouse, etc.)
+
+IMPORTANT: This is a **cosmetic/UI feature**. The constitution MUST include a dedicated "UI & Regression Testing" section in the output. If the codebase has no existing e2e or visual testing setup, explicitly state that Playwright should be adopted with:
+- \`playwright.config.ts\` with \`screenshot: 'on'\` and a \`webServer\` block
+- Tests in an \`e2e/\` directory
+- Screenshots saved to \`test-results/\`
+- Chromium-only for speed
+`
+		: "";
+
 	return `# Spec-Kit Phase 1: Constitution
 
 You are analyzing a codebase to extract coding principles and standards.
@@ -92,7 +115,7 @@ ${memoriesSection}
 ## Context
 - Client: ${ctx.clientName}
 - Repository: ${ctx.repoName}
-- Feature: ${ctx.featureTitle}
+- Feature: ${ctx.featureTitle}${isCosmetic ? "\n- Feature Type: Cosmetic/UI Change" : ""}
 
 ## Your Task
 Analyze the codebase and generate a "constitution" - a document that captures:
@@ -112,6 +135,7 @@ Analyze the codebase and generate a "constitution" - a document that captures:
    - Test file locations and naming
    - Testing frameworks used
    - Coverage expectations
+   - Test-Driven Development (TDD): the constitution MUST require writing tests before or alongside implementation. Every new function, component, or endpoint should have corresponding test coverage. If the codebase has no tests, the constitution should mandate setting up a test framework and writing tests for all new code.
 
 4. **Tech Stack Details**
    - Key frameworks and libraries
@@ -121,7 +145,7 @@ Analyze the codebase and generate a "constitution" - a document that captures:
 5. **Existing AGENTS.md or CLAUDE.md Files**
    - Look for any existing AI assistant guidance files
    - Incorporate their instructions
-
+${cosmeticSection}
 ## Output Format
 Output a JSON object with this structure:
 \`\`\`json
