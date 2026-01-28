@@ -41,6 +41,7 @@ import {
 	startTrace,
 } from "./observability/index.js";
 import {
+	clearUploadTracking,
 	collectScreenshots,
 	getPlaywrightPromptInstructions,
 	isCosmeticFeature,
@@ -728,6 +729,8 @@ export async function runRalphJob(jobId: string): Promise<void> {
 		);
 		endSpan(trace, "error");
 	} finally {
+		// Clean up upload tracking for cosmetic features
+		clearUploadTracking(jobId);
 		// Keep worktree for debugging - will be cleaned up on next job for same branch
 	}
 }
@@ -1650,6 +1653,8 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 			`PRD job failed: ${(err as Error).message}`,
 		);
 	} finally {
+		// Clean up upload tracking for cosmetic features
+		clearUploadTracking(jobId);
 		// Keep worktree for debugging - will be cleaned up on next job for same branch
 	}
 }
@@ -2679,6 +2684,9 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 			"system",
 			`Spec-Kit job failed: ${(err as Error).message}`,
 		);
+	} finally {
+		// Clean up upload tracking for cosmetic features
+		clearUploadTracking(jobId);
 	}
 }
 

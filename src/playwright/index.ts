@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createAttachment, uploadToStorage } from "../db/queries.js";
 
@@ -109,18 +109,25 @@ function collectFromDir(
 
 		const fullPath = join(dirPath, entry);
 		try {
-			const stat = statSync(fullPath);
-			if (stat.isDirectory()) {
+			// Use lstatSync to detect symlinks without following them
+			const lstat = lstatSync(fullPath);
+
+			// Skip symbolic links to prevent escaping worktree
+			if (lstat.isSymbolicLink()) {
+				continue;
+			}
+
+			if (lstat.isDirectory()) {
 				collectFromDir(worktreePath, fullPath, results);
 			} else if (
-				stat.isFile() &&
+				lstat.isFile() &&
 				SCREENSHOT_EXTENSIONS.some((ext) => entry.toLowerCase().endsWith(ext))
 			) {
 				results.push({
 					path: fullPath,
 					relativePath: relative(worktreePath, fullPath),
 					name: entry,
-					size: stat.size,
+					size: lstat.size,
 				});
 			}
 		} catch {

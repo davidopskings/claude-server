@@ -49,7 +49,7 @@ When a feature has `feature_type_id = "acd9cd67-b58f-4cdf-b588-b386d812f69c"` (C
 1. Inject Playwright instructions into the Claude prompt (write e2e tests + capture screenshots)
 2. Add `npx playwright test --reporter=list` to feedback commands
 3. After each iteration, collect screenshots from `test-results/` and `playwright-report/`
-4. Upload them to Supabase Storage bucket `screenshots` at path `jobs/{jobId}/{fileName}`
+4. Upload them to Supabase Storage bucket `screenshots` at path `jobs/{jobId}/{relativePath}` (e.g., `jobs/{jobId}/test-results/hero.png`)
 5. Create `attachments` records linked to the feature
 
 ### Detection Flow
