@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import express, {
 	type NextFunction,
@@ -33,6 +34,7 @@ import {
 	getFeatureSpecOutput,
 	getRepositoryByClientId,
 	getSpecJobsForFeature,
+	MACHINE_ID,
 	updateFeatureSpecOutput,
 	updateFeatureWorkflowStageByCode,
 } from "./db/queries.js";
@@ -166,6 +168,7 @@ app.get("/health", async (_req: Request, res: Response) => {
 
 	res.json({
 		status: "ok",
+		machineId: MACHINE_ID,
 		queue: {
 			running: queueStatus.running.length,
 			queued: queueStatus.queued.length,
@@ -1444,6 +1447,95 @@ app.get("/observability/export", async (_req: Request, res: Response) => {
 	try {
 		const data = exportTraces();
 		res.json(data);
+	} catch (err) {
+		res.status(500).json({ error: (err as Error).message });
+	}
+});
+
+// ----- Claude Usage -----
+
+// Helper to get Claude OAuth token from macOS Keychain
+async function getClaudeOAuthToken(): Promise<string | null> {
+	const { exec } = await import("node:child_process");
+	const { promisify } = await import("node:util");
+	const execAsync = promisify(exec);
+
+	try {
+		const { stdout } = await execAsync(
+			'security find-generic-password -s "Claude Code-credentials" -w',
+		);
+		const credentials = JSON.parse(stdout.trim());
+		return credentials?.claudeAiOauth?.accessToken || null;
+	} catch {
+		return null;
+	}
+}
+
+// Fetch real-time usage limits from Anthropic API
+async function fetchUsageLimits(): Promise<Record<string, unknown> | null> {
+	const token = await getClaudeOAuthToken();
+	if (!token) return null;
+
+	try {
+		const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+			headers: {
+				Accept: "application/json",
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+				"anthropic-beta": "oauth-2025-04-20",
+			},
+		});
+
+		if (!response.ok) return null;
+		return (await response.json()) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
+// Get Claude usage statistics and real-time rate limits
+app.get("/usage", async (_req: Request, res: Response) => {
+	try {
+		// Fetch real-time usage limits from Anthropic API
+		const limits = await fetchUsageLimits();
+
+		// Also load cached stats for historical data
+		let stats = null;
+		try {
+			const statsPath = `${homedir()}/.claude/stats-cache.json`;
+			const statsContent = await readFile(statsPath, "utf-8");
+			stats = JSON.parse(statsContent);
+		} catch {
+			// Stats file not available, continue with just limits
+		}
+
+		res.json({
+			// Real-time rate limits (refreshes live)
+			limits: limits
+				? {
+						fiveHour: limits.five_hour,
+						sevenDay: limits.seven_day,
+						sevenDayOpus: limits.seven_day_opus,
+						sevenDaySonnet: limits.seven_day_sonnet,
+						extraUsage: limits.extra_usage,
+					}
+				: null,
+			// Cached historical stats (refreshes daily)
+			stats: stats
+				? {
+						version: stats.version,
+						lastComputedDate: stats.lastComputedDate,
+						firstSessionDate: stats.firstSessionDate,
+						totalMessages: stats.totalMessages,
+						totalSessions: stats.totalSessions,
+						longestSession: stats.longestSession,
+						modelUsage: stats.modelUsage,
+						hourCounts: stats.hourCounts,
+						dailyActivity: stats.dailyActivity,
+						dailyModelTokens: stats.dailyModelTokens,
+					}
+				: null,
+		});
 	} catch (err) {
 		res.status(500).json({ error: (err as Error).message });
 	}

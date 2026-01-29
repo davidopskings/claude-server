@@ -219,6 +219,7 @@ export type Database = {
 					spec_phase: string | null;
 					started_at: string | null;
 					status: string;
+					target_machine: string | null;
 					title: string | null;
 					total_iterations: number | null;
 					updated_at: string | null;
@@ -255,6 +256,7 @@ export type Database = {
 					spec_phase?: string | null;
 					started_at?: string | null;
 					status?: string;
+					target_machine?: string | null;
 					title?: string | null;
 					total_iterations?: number | null;
 					updated_at?: string | null;
@@ -291,6 +293,7 @@ export type Database = {
 					spec_phase?: string | null;
 					started_at?: string | null;
 					status?: string;
+					target_machine?: string | null;
 					title?: string | null;
 					total_iterations?: number | null;
 					updated_at?: string | null;

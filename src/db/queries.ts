@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import type { Database, Json } from "../types/supabase.js";
 import { supabase } from "./client.js";
 import type {
@@ -18,6 +19,10 @@ import type {
 	SpecOutput,
 	SpecPhase,
 } from "./types.js";
+
+// Machine identifier for distributed job processing
+// Each machine only processes jobs assigned to it
+export const MACHINE_ID = process.env.MACHINE_ID || hostname();
 
 // ----- Repositories -----
 
@@ -157,6 +162,7 @@ export async function getQueuedJobs(): Promise<AgentJob[]> {
 		.from("agent_jobs")
 		.select("*")
 		.eq("status", "queued")
+		.eq("target_machine", MACHINE_ID)
 		.order("created_at", { ascending: true });
 
 	return data || [];
@@ -166,7 +172,8 @@ export async function getRunningJobs(): Promise<AgentJob[]> {
 	const { data } = await supabase
 		.from("agent_jobs")
 		.select("*")
-		.eq("status", "running");
+		.eq("status", "running")
+		.eq("target_machine", MACHINE_ID);
 
 	return data || [];
 }
@@ -212,6 +219,8 @@ export async function createJob(job: {
 		job_type: job.jobType,
 		created_by_team_member_id: job.createdByTeamMemberId,
 		status: "queued",
+		// Machine assignment for distributed processing
+		target_machine: MACHINE_ID,
 		// Ralph-specific fields
 		max_iterations: job.maxIterations,
 		completion_promise: job.completionPromise,
@@ -827,6 +836,7 @@ export async function createSpecJob(params: {
 			: null,
 		created_by_team_member_id: params.createdByTeamMemberId,
 		status: "queued",
+		target_machine: MACHINE_ID,
 	};
 
 	const { data, error } = await supabase

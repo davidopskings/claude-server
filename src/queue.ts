@@ -157,17 +157,6 @@ export async function getQueuedCount(): Promise<number> {
 export async function initQueue(): Promise<void> {
 	console.log(`Queue initialized with max ${MAX_CONCURRENT} concurrent jobs`);
 
-	// Mark any stale running jobs as failed (from server restart)
-	const running = await getRunningJobs();
-	for (const job of running) {
-		console.log(`Marking stale job ${job.id} as failed (server restart)`);
-		await updateJob(job.id, {
-			status: "failed",
-			error: "Job was interrupted by server restart",
-			completed_at: new Date().toISOString(),
-		});
-	}
-
 	// Start processing queue
 	await processQueue();
 }
