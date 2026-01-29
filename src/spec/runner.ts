@@ -344,16 +344,50 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			// Parse Claude's output
 			parseResult = parseSpecOutput(result.output, specPhase);
 
-			// Handle parse failure - output is already saved above
+			// Handle parse failure - attempt recovery by asking Claude to reformat
 			if (!parseResult.success) {
 				await addJobMessage(
 					jobId,
 					"stderr",
 					`Failed to parse spec output: ${parseResult.error}\nLast 500 chars: ${parseResult.rawOutput}`,
 				);
-				throw new Error(
-					`Spec phase ${specPhase} failed: ${parseResult.error}. Output may have been truncated.`,
+
+				// Attempt recovery - ask Claude to reformat the output as JSON
+				await addJobMessage(
+					jobId,
+					"system",
+					"Attempting recovery: asking Claude to reformat output as JSON...",
 				);
+
+				const recoveryResult = await attemptJsonRecovery(
+					result.output,
+					specPhase,
+					worktreePath,
+					jobId,
+				);
+
+				if (recoveryResult.success) {
+					parseResult = recoveryResult.parseResult;
+					await addJobMessage(
+						jobId,
+						"system",
+						"Recovery successful: JSON extracted from reformatted output",
+					);
+				} else {
+					await addJobMessage(
+						jobId,
+						"stderr",
+						`Recovery failed: ${recoveryResult.error}`,
+					);
+					throw new Error(
+						`Spec phase ${specPhase} failed: ${parseResult.error}. Recovery also failed: ${recoveryResult.error}`,
+					);
+				}
+			}
+
+			// parseResult must be successful here (we throw on failure above)
+			if (!parseResult.success) {
+				throw new Error("Unexpected: parseResult not successful after recovery");
 			}
 
 			// Save constitution to client for reuse across features
@@ -377,6 +411,13 @@ export async function runSpecJob(jobId: string): Promise<void> {
 					);
 				}
 			}
+		}
+
+		// At this point parseResult must be successful (we throw otherwise in both branches)
+		if (!parseResult.success) {
+			throw new Error(
+				"Unexpected: parseResult not successful after parse/recovery",
+			);
 		}
 
 		// Merge with existing output
@@ -748,6 +789,126 @@ async function runClaudeForSpec(
 			});
 		});
 	});
+}
+
+// Build a recovery prompt to ask Claude to reformat output as JSON
+function buildRecoveryPrompt(rawOutput: string, phase: SpecPhase): string {
+	const phaseSchemas: Record<SpecPhase, string> = {
+		constitution: `{
+  "constitution": "markdown string with all coding principles",
+  "techStack": { "frontend": [], "backend": [], "testing": [], "build": [] },
+  "keyPatterns": []
+}`,
+		specify: `{
+  "spec": {
+    "overview": "markdown description",
+    "requirements": [{ "id": "REQ-001", "description": "...", "priority": "must" }],
+    "acceptanceCriteria": [{ "id": "AC-001", "requirement": "REQ-001", "criteria": "..." }],
+    "outOfScope": [],
+    "edgeCases": []
+  }
+}`,
+		clarify: `{
+  "clarifications": [{ "id": "CLR-001", "category": "...", "question": "...", "context": "..." }],
+  "assumptions": [],
+  "risksIfUnclarified": []
+}`,
+		plan: `{
+  "plan": {
+    "architecture": "markdown overview",
+    "techDecisions": [{ "decision": "...", "rationale": "...", "alternatives": [] }],
+    "fileStructure": { "create": [], "modify": [] },
+    "schemaChanges": [],
+    "apiChanges": [],
+    "dependencies": []
+  }
+}`,
+		analyze: `{
+  "analysis": {
+    "passed": true,
+    "issues": [{ "severity": "error|warning|info", "description": "...", "suggestion": "..." }],
+    "existingPatterns": [],
+    "reusableCode": [],
+    "suggestions": []
+  }
+}`,
+		tasks: `{
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Short task title",
+      "description": "Detailed description",
+      "files": [],
+      "tests": [],
+      "dependencies": [],
+      "estimatePoints": 1,
+      "acceptanceCriteria": []
+    }
+  ],
+  "totalEstimatePoints": 0,
+  "criticalPath": [],
+  "parallelizable": []
+}`,
+	};
+
+	// Truncate raw output if too long (keep last 15000 chars which likely has the content)
+	const maxOutputLength = 15000;
+	const truncatedOutput =
+		rawOutput.length > maxOutputLength
+			? `[...truncated...]\n${rawOutput.slice(-maxOutputLength)}`
+			: rawOutput;
+
+	return `The previous response did not contain valid JSON. Please extract the information from this output and reformat it as valid JSON.
+
+## Expected JSON Schema for "${phase}" phase:
+\`\`\`json
+${phaseSchemas[phase]}
+\`\`\`
+
+## Previous Output to Extract From:
+${truncatedOutput}
+
+IMPORTANT: Respond with ONLY a valid JSON object inside a \`\`\`json code block. No explanations, no summaries, just the JSON. Extract all the relevant information from the previous output and structure it according to the schema above.`;
+}
+
+// Attempt to recover from a parse failure by asking Claude to reformat
+async function attemptJsonRecovery(
+	rawOutput: string,
+	phase: SpecPhase,
+	cwd: string,
+	jobId: string,
+): Promise<
+	| { success: true; parseResult: ParseResult & { success: true } }
+	| { success: false; error: string }
+> {
+	const recoveryPrompt = buildRecoveryPrompt(rawOutput, phase);
+
+	try {
+		const result = await runClaudeForSpec(recoveryPrompt, cwd, jobId);
+
+		if (result.exitCode !== 0) {
+			return {
+				success: false,
+				error: `Recovery Claude call failed: ${result.error || `exit code ${result.exitCode}`}`,
+			};
+		}
+
+		const parseResult = parseSpecOutput(result.output, phase);
+
+		if (!parseResult.success) {
+			return {
+				success: false,
+				error: `Recovery output still not valid JSON: ${parseResult.error}`,
+			};
+		}
+
+		return { success: true, parseResult };
+	} catch (err) {
+		return {
+			success: false,
+			error: `Recovery attempt threw: ${(err as Error).message}`,
+		};
+	}
 }
 
 // Result type for parseSpecOutput

@@ -524,7 +524,9 @@ Output a JSON object with this structure:
 - \`criticalPath\` is the sequence of tasks that determine minimum time to completion
 - \`parallelizable\` groups tasks that can be done simultaneously
 
-Each task should be completable by Claude/Ralph in a single iteration. Break complex tasks into smaller ones.`;
+Each task should be completable by Claude/Ralph in a single iteration. Break complex tasks into smaller ones.
+
+CRITICAL: Your response MUST be ONLY the JSON object inside a \`\`\`json code block. Do NOT include any summary, explanation, commentary, or markdown text outside the JSON. The JSON must be complete and valid - do not truncate it.`;
 }
 
 // Get the appropriate prompt builder for a phase
