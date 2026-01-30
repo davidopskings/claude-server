@@ -1071,7 +1071,7 @@ export const RALPH_STAGE_CODES = {
 	ralph_clarify: "ralph_clarify", // 136
 	ralph_dev_review: "ralph_dev_review", // 138
 	ralph_ba_review: "ralph_ba_review", // 139
-	ralph_complete: "ralph_complete", // 140
+	ralph_complete: "screen_validation", // 300
 } as const;
 
 export type SpecStageCode =
