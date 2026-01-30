@@ -722,6 +722,15 @@ export async function runRalphJob(jobId: string): Promise<void> {
 			completion_reason: "iteration_error",
 		});
 
+		// Set the ralph_failed workflow stage
+		if (job.feature_id) {
+			await setRalphFeatureStage(
+				job.feature_id,
+				RALPH_STAGE_CODES.ralph_failed,
+				jobId,
+			);
+		}
+
 		await addJobMessage(
 			jobId,
 			"system",
@@ -1646,6 +1655,15 @@ export async function runRalphPrdJob(jobId: string): Promise<void> {
 			completion_reason: "iteration_error",
 			prd_progress: JSON.parse(JSON.stringify(prdProgress)),
 		});
+
+		// Set the ralph_failed workflow stage
+		if (job.feature_id) {
+			await setRalphFeatureStage(
+				job.feature_id,
+				RALPH_STAGE_CODES.ralph_failed,
+				jobId,
+			);
+		}
 
 		await addJobMessage(
 			jobId,
@@ -2678,6 +2696,15 @@ export async function runRalphSpecJob(jobId: string): Promise<void> {
 			error: (err as Error).message || String(err),
 			completion_reason: "iteration_error",
 		});
+
+		// Set the ralph_failed workflow stage
+		if (job.feature_id) {
+			await setRalphFeatureStage(
+				job.feature_id,
+				RALPH_STAGE_CODES.ralph_failed,
+				jobId,
+			);
+		}
 
 		await addJobMessage(
 			jobId,

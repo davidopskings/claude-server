@@ -56,19 +56,23 @@ function getPhaseStageCode(
 		constitution: {
 			running: SPEC_STAGE_CODES.constitution_running,
 			complete: SPEC_STAGE_CODES.constitution_complete,
+			failed: SPEC_STAGE_CODES.constitution_failed,
 		},
 		specify: {
 			running: SPEC_STAGE_CODES.specify_running,
 			complete: SPEC_STAGE_CODES.specify_complete,
+			failed: SPEC_STAGE_CODES.specify_failed,
 		},
 		clarify: {
 			running: SPEC_STAGE_CODES.clarify_running,
 			complete: SPEC_STAGE_CODES.clarify_complete,
 			waiting: SPEC_STAGE_CODES.clarify_waiting,
+			failed: SPEC_STAGE_CODES.clarify_failed,
 		},
 		plan: {
 			running: SPEC_STAGE_CODES.plan_running,
 			complete: SPEC_STAGE_CODES.plan_complete,
+			failed: SPEC_STAGE_CODES.plan_failed,
 		},
 		analyze: {
 			running: SPEC_STAGE_CODES.analyze_running,
@@ -78,6 +82,7 @@ function getPhaseStageCode(
 		tasks: {
 			running: SPEC_STAGE_CODES.tasks_running,
 			complete: SPEC_STAGE_CODES.tasks_complete,
+			failed: SPEC_STAGE_CODES.tasks_failed,
 		},
 	};
 
@@ -712,6 +717,14 @@ export async function runSpecJob(jobId: string): Promise<void> {
 			completed_at: new Date().toISOString(),
 			error: (err as Error).message || String(err),
 		});
+
+		// Set the phase-specific failure stage
+		if (job.feature_id) {
+			const failedStage = getPhaseStageCode(specPhase, "failed");
+			if (failedStage) {
+				await setFeatureStage(job.feature_id, failedStage, jobId);
+			}
+		}
 
 		await addJobMessage(
 			jobId,
